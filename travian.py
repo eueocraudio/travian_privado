@@ -86,6 +86,10 @@ SCRIPTS = {
     # esconderijo: realizado DENTRO de construir_dorf2 (decidir_dorf2). Rampa
     # probabilística "na sorte" sobe com o fim da proteção; alvo ~2000 de cap.
     "esconderijo":     {"tipo": "agendado", "feito": True},
+    # muro: realizado DENTRO de construir_dorf2 (decidir_dorf2), com PRIORIDADE
+    # enquanto há proteção de iniciante; sobe até MURO_NIVEL_ALVO (5) no slot
+    # fixo 40 (local específico do muro). gid por tribo (gid_muro).
+    "muro":            {"tipo": "agendado", "feito": True},
     # atacar_oasis: assalto a oásis sem defesa (gated por OASIS_ATIVO no .env;
     # aventura SEMPRE roda antes no ciclo). Conservador: só sem_tropas=1.
     "atacar_oasis":    {"tipo": "agendado", "feito": True},
@@ -118,10 +122,21 @@ class Travian:
             arq.flush()
             return json.loads(arq.readline()).get("resultados", [])
 
-    def ir(self, url, espera=5):
+    def ir(self, url, espera=5, recarregar=False):
         """Navega e devolve (url_final, html). Faz uma pausa aleatória
         (SLEEP_NAV_MIN..MAX) ANTES de navegar — comportamento humano — e
-        depois espera 'espera' s para a página carregar/renderizar."""
+        depois espera 'espera' s para a página carregar/renderizar.
+
+        Se já estamos NA url alvo (e recarregar=False), relê o HTML sem
+        recarregar a página — evita reloads redundantes/suspeitos. Passe
+        recarregar=True quando precisar de um refetch fresco do servidor."""
+        if not recarregar:
+            atual = self.url_atual()
+            if atual and self._mesma_url(atual, url):
+                r = self.enviar([{"type": "url"}, {"type": "html"}])
+                u = next((x["url"] for x in r if x["type"] == "url"), atual)
+                h = next((x["html"] for x in r if x["type"] == "html"), "")
+                return u, h
         time.sleep(random.randint(SLEEP_NAV_MIN, SLEEP_NAV_MAX))
         r = self.enviar([
             {"type": "navigate", "value": url},
@@ -133,14 +148,49 @@ class Travian:
         h = next((x["html"] for x in r if x["type"] == "html"), "")
         return u, h
 
+    @staticmethod
+    def _mesma_url(a, b):
+        """Compara URLs ignorando fragmento (#...) e barra final."""
+        norm = lambda s: (s or "").split("#")[0].rstrip("/")
+        return norm(a) == norm(b)
+
     def url_atual(self):
         r = self.enviar([{"type": "url"}])
         return next((x["url"] for x in r if x["type"] == "url"), None)
 
+    def comentar(self, texto):
+        """Anota '[COMENTARIO] texto' no log do browser (action 'comment' —
+        fura a fila, não toca a página). Usado antes de cada script."""
+        try:
+            self.enviar([{"type": "comment", "value": str(texto)}])
+        except Exception:
+            pass
+
+    def titulo(self, texto):
+        """Troca o título da janela do browser (action 'title' — fura a fila)."""
+        try:
+            self.enviar([{"type": "title", "value": str(texto)}])
+        except Exception:
+            pass
+
     # ---- login ---------------------------------------------------------
+    def esta_logado(self, html):
+        """Heurística: estamos logados no JOGO se a página tem a barra de
+        recursos (id 'l1' do estoque) ou os campos de recurso — a tela de
+        login/lobby não tem nenhum dos dois."""
+        return bool(re.search(r'id="l1"|resourceField\s+gid\d', html or ""))
+
     def login(self):
-        """Loga direto no servidor de jogo (clicar 'Entrar', não Enter cru)."""
-        u, _ = self.ir(self.base, 6)
+        """Garante a sessão no servidor de jogo. XI: se o perfil JÁ está logado
+        (navegar pro dorf1 cai no jogo, não na tela de login), NÃO refaz o
+        login — reusa a sessão persistente do perfil. Só autentica quando a
+        página de login aparece."""
+        u, html = self.ir(self.base + "/dorf1.php", 6)
+        if self.esta_logado(html):
+            self.comentar("já logado (sessão do perfil)")
+            return u
+        self.comentar("fazendo login")
+        u, _ = self.ir(self.base, 6, recarregar=True)
         self.enviar([
             {"type": "key", "xpath": "//input[@name='name']", "value": self.email},
             {"type": "key", "xpath": "//input[@name='password']", "value": self.senha},
@@ -409,6 +459,27 @@ class Travian:
         ok = self.construir(slot, 23)
         return ok, "criar slot %d (%s)" % (slot, "construindo" if ok else "recusado")
 
+    def subir_muro(self, gid_fallback, nivel_alvo=5):
+        """Sobe o MURO até nivel_alvo. O muro só existe num LOCAL ESPECÍFICO: o
+        slot fixo 40 do dorf2 (o anel da aldeia). Lê o gid real do dorf2 quando
+        o muro já tem nível; se ainda está no nível 0 (slot vazio), constrói com
+        gid_fallback (o gid do muro da tribo). Devolve (ok, msg)."""
+        _, html = self.ir(self.base + "/dorf2.php", 4)
+        muro = next((e for e in self.edificios_dorf2(html) if e["slot"] == 40),
+                    None)
+        if muro:
+            if muro["nivel"] >= nivel_alvo:
+                return False, "muro no nível %d (>=%d)" % (muro["nivel"],
+                                                           nivel_alvo)
+            ok = self._subir_verde(40, muro["gid"])
+            return ok, "subir muro slot 40 nível %d->%d (%s)" % (
+                muro["nivel"], muro["nivel"] + 1,
+                "construindo" if ok else "recusado")
+        # muro ainda não construído (slot 40 vazio) -> constrói no slot 40
+        ok = self.construir(40, gid_fallback)
+        return ok, "criar muro slot 40 gid %d (%s)" % (
+            gid_fallback, "construindo" if ok else "recusado")
+
     def evoluir(self, onde=None):
         """Evolui: 'dorf1' (campo), 'dorf2' (edifício) ou aleatório (None)."""
         onde = onde or random.choice(["dorf1", "dorf2"])
@@ -657,6 +728,11 @@ class Travian:
         defesa na hora (animais nascem). Manda força máxima das tropas em casa;
         herói entra se OASIS_HEROI_OBRIGATORIO=false e estiver em casa."""
         cfg = cfg or {}
+        estr = cfg.get("_estrategia") or {"modo": "sem_perdas", "evitar": set()}
+        modo = estr.get("modo", "sem_perdas")
+        if modo == "defensivo":
+            return False, "estratégia defensiva: não ataca"
+        evitar = estr.get("evitar") or set()
         heroi_obrig = str(cfg.get("OASIS_HEROI_OBRIGATORIO", "true")).strip(
             ).lower() in ("1", "true", "sim", "yes")
         disp, _ = self.tropas_disponiveis_ataque()
@@ -666,26 +742,37 @@ class Travian:
         if not exercito and not mandar_heroi:
             return False, ("sem tropa p/ assalto"
                            + ("" if tem_heroi else " (herói fora)"))
-        alvos = db.execute(
-            "SELECT x,y,distancia FROM oasis WHERE ocupado=0 AND sem_tropas=1 "
-            "ORDER BY distancia ASC LIMIT 5").fetchall()
+        # XIII: agressivo ataca qualquer oásis livre; sem_perdas só os sem defesa.
+        if modo == "agressivo":
+            alvos = db.execute(
+                "SELECT x,y,distancia FROM oasis WHERE ocupado=0 "
+                "ORDER BY distancia ASC LIMIT 8").fetchall()
+        else:
+            alvos = db.execute(
+                "SELECT x,y,distancia FROM oasis WHERE ocupado=0 AND sem_tropas=1 "
+                "ORDER BY distancia ASC LIMIT 5").fetchall()
         if not alvos:
-            return False, "sem oásis livre/sem-defesa no DB (rode 'scan')"
+            return False, "sem oásis alvo no DB (rode 'scan')"
         for x, y, dist in alvos:
+            if (x, y) in evitar:                    # XIII: histórico marcou risco
+                continue
             det = self.oasis_detalhe(x, y)          # re-confere defesa AGORA (XHR)
             if det:
                 db.execute("UPDATE oasis SET ocupado=?, sem_tropas=? "
                            "WHERE x=? AND y=?",
                            (det["ocupado"], det["sem_tropas"], x, y))
                 db.commit()
-            if det and det["ocupado"] == 0 and det["sem_tropas"] == 1:
+            # sem_perdas exige sem defesa; agressivo ataca mesmo com defesa.
+            pode = det and det["ocupado"] == 0 and (
+                modo == "agressivo" or det["sem_tropas"] == 1)
+            if pode:
                 tropas = dict(exercito)
                 if mandar_heroi:
                     tropas["t11"] = 1
                 ok = self._enviar_assalto(x, y, tropas, mandar_heroi)
-                return ok, ("assalto -> (%d|%d) dist %.1f" % (x, y, dist)
+                return ok, ("assalto[%s] -> (%d|%d) dist %.1f" % (modo, x, y, dist)
                             if ok else "falha ao enviar p/ (%d|%d)" % (x, y))
-        return False, "oásis candidatos ganharam defesa; nada enviado"
+        return False, "nenhum oásis elegível (%s); nada enviado" % modo
 
     # ---- tarefas diárias (daily quests) -------------------------------
     def tem_tarefas_diarias(self, html=None):
@@ -888,8 +975,13 @@ class Travian:
 # Estrutura: account/<servidor>/<usuario>/  -> .env (credenciais) e
 # travian.sqlite (histórico). A conta é escolhida por TRAVIAN_ACCOUNT
 # ("<servidor>/<usuario>") ou, se houver só uma, automaticamente.
+# Os dados de usuário (contas/perfil/tarball) ficam FORA do checkout, em
+# ~/travian por padrão (sobrescrevível por TRAVIAN_DADOS), para manter código
+# versionável separado de credenciais/sessão.
 DIR_ESTE = os.path.dirname(os.path.abspath(__file__))
-DIR_CONTAS = os.path.join(DIR_ESTE, "account")
+DIR_DADOS = os.environ.get("TRAVIAN_DADOS") or os.path.join(
+    os.path.expanduser("~"), "travian")
+DIR_CONTAS = os.path.join(DIR_DADOS, "account")
 
 
 def carregar_env(caminho):
@@ -902,6 +994,23 @@ def carregar_env(caminho):
                     k, v = linha.split("=", 1)
                     cfg[k.strip()] = v.strip()
     return cfg
+
+
+def conferir_env_template(conta_dir):
+    """XIV: ao entrar no projeto, confere se o .env da conta tem todas as chaves
+    do .env.template (a referência canônica). Avisa as que faltam — informativo,
+    não aborta (chaves ausentes usam o default do código)."""
+    template = os.path.join(DIR_ESTE, ".env.template")
+    if not os.path.isfile(template):
+        return
+    do_template = set(carregar_env(template))
+    do_env = set(carregar_env(os.path.join(conta_dir, ".env")))
+    faltando = do_template - do_env
+    if faltando:
+        print("== AVISO: .env com %d chave(s) a menos que o .env.template ==="
+              % len(faltando))
+        print("  faltam: %s" % ", ".join(sorted(faltando)))
+        print("  referência: %s (ausentes usam o default do código)" % template)
 
 
 def listar_contas():
@@ -1056,6 +1165,37 @@ def tribo_conta(t, db):
     return v
 
 
+def protecao_restante_seg(html):
+    """Segundos restantes da proteção de iniciante (texto 'HH:MM:SS horas de
+    proteção' do dorf1), ou 0 se não há/terminou."""
+    txt = re.sub(r"<[^>]+>", " ", html).replace("‭", "").replace("‬", "")
+    m = re.search(r"(\d+):(\d+):(\d+)\s*horas? de prote", txt)
+    if not m:
+        return 0
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+
+# gid do MURO por tribo (slot fixo 40). Override por MURO_GID no .env.
+GID_MURO = (("roman", 31),                       # Muralha (romanos)
+            ("teut", 32), ("germ", 32), ("alem", 32),   # Muralha de terra
+            ("gaul", 33), ("gál", 33), ("gal", 33),     # Paliçada (gauleses)
+            ("eg", 42),                          # Muralha de pedra (egípcios)
+            ("hun", 43))                         # Muralha de estacas (hunos)
+
+
+def gid_muro(tribo, cfg=None):
+    """gid do muro conforme a tribo (fallback p/ quando o muro está no nível 0
+    e não dá pra ler o gid do dorf2). MURO_GID no .env força um valor."""
+    cfg = cfg or {}
+    if cfg.get("MURO_GID"):
+        return int(cfg["MURO_GID"])
+    t = (tribo or "").lower()
+    for pref, g in GID_MURO:
+        if t.startswith(pref):
+            return g
+    return 31                                    # fallback: Muralha (romano)
+
+
 def prob_esconderijo(db, html):
     """Probabilidade (0..1) de mandar no esconderijo neste ciclo. Sobe conforme
     a proteção de iniciante acaba ('na sorte'): p = 1 - restante/máximo, onde o
@@ -1074,10 +1214,21 @@ def prob_esconderijo(db, html):
 
 
 def decidir_dorf2(t, db, cfg, html_dorf1):
-    """Decisão do dorf2: primeiro a RAMPA DO ESCONDERIJO ('na sorte', sobe com o
-    fim da proteção); se não sortear (ou já no alvo), escolhe evoluir × criar
-    novo. Para de mirar o esconderijo ao atingir CRANNY_NIVEL_ALVO (~2000)."""
+    """Decisão do dorf2, por prioridade:
+    1) X: MURO até MURO_NIVEL_ALVO (5) ENQUANTO há proteção de iniciante — o
+       muro precisa estar levantado antes de a proteção acabar;
+    2) RAMPA DO ESCONDERIJO ('na sorte', sobe com o fim da proteção);
+    3) evoluir × criar novo (base normal)."""
     cfg = cfg or {}
+    # 1) MURO durante a proteção (só local específico: slot 40).
+    prot = protecao_restante_seg(html_dorf1)
+    if prot > 0:
+        muro_alvo = int(cfg.get("MURO_NIVEL_ALVO", "5"))
+        okm, msgm = t.subir_muro(gid_muro(tribo_conta(t, db), cfg), muro_alvo)
+        if okm:
+            return okm, "MURO(prot %dh%02dm): %s" % (
+                prot // 3600, (prot % 3600) // 60, msgm)
+        # muro já no alvo OU recusado (fila/recurso) -> tenta esconderijo/normal
     p = prob_esconderijo(db, html_dorf1)
     nivel_alvo = int(cfg.get("CRANNY_NIVEL_ALVO", "10"))
     if random.random() < p:
@@ -1089,20 +1240,67 @@ def decidir_dorf2(t, db, cfg, html_dorf1):
     return t.construir_ou_evoluir_dorf2(cfg)
 
 
-def oasis_habilitado(t, db, cfg):
+def rotulo_conta():
+    """'{SERVER}.{ACCOUNT}' a partir de TRAVIAN_ACCOUNT='server/user'
+    (rótulo da janela do browser)."""
+    acc = os.environ.get("TRAVIAN_ACCOUNT", "")
+    if "/" in acc:
+        srv, usr = acc.split("/", 1)
+        return "%s.%s" % (srv, usr)
+    return acc or "travian"
+
+
+def exercito_no_dorf1(html):
+    """Há tropa de EXÉRCITO parada na aldeia, segundo o HTML do dorf1?
+    Devolve True/False/None (None = bloco de tropas não encontrado -> deixa
+    o chamador cair no método antigo, lendo a página de envio).
+
+    O dorf1 lista as tropas próprias num bloco com unidades <img class="unit
+    uN"> e a quantidade ao lado; o herói é a unidade 'uhero' (ignorada). Um
+    'Tropas nenhum(a)' (ou bloco vazio) significa sem exército.
+    OBS: seletor confirmar AO VIVO — por isso o None conservador."""
+    m = re.search(r'(troop_details|id="troops"|class="[^"]*\btroops?\b[^"]*")',
+                  html)
+    if not m:
+        return None                       # sem bloco reconhecível -> inconclusivo
+    bloco = html[m.start():m.start() + 4000]
+    if re.search(r"tropas?\s+nenhum", bloco, re.I):
+        return False
+    for u in re.finditer(r'class="unit\s+u(\d+)\b', bloco):
+        cauda = re.sub(r"<[^>]+>", " ", bloco[u.end():u.end() + 120])
+        q = re.search(r"(\d[\d.‭‬]*)", cauda)
+        if q and _num(q.group(1)) > 0:    # unidade de tropa com quantidade > 0
+            return True
+    return False
+
+
+def oasis_habilitado(t, db, cfg, html_dorf1=None):
     """Decide se o assalto a oásis roda neste ciclo. Liga SOZINHO quando há
-    exército: enquanto não há, checa a página de envio só 1x a cada OASIS_CHECK_H
-    horas (barato); ao detectar tropa de exército grava meta['tem_exercito']=1 e
-    passa a rodar todo ciclo. OASIS_ATIVO força on; OASIS_AUTO=false desliga o
-    automático."""
+    exército. Se o HTML do dorf1 (já lido no ciclo) for conclusivo sobre haver
+    tropa, decide sem navegação extra; só cai na página de envio quando o dorf1
+    é inconclusivo e passou OASIS_CHECK_H horas. OASIS_ATIVO força on;
+    OASIS_AUTO=false desliga o automático."""
     cfg = cfg or {}
     sim = ("1", "true", "sim", "yes")
+    # XIII: estratégia defensiva nunca ataca.
+    if (cfg.get("_estrategia") or {}).get("modo") == "defensivo":
+        return False
     if str(cfg.get("OASIS_ATIVO", "false")).strip().lower() in sim:
         return True
     if str(cfg.get("OASIS_AUTO", "true")).strip().lower() not in sim:
         return False
     if meta_get(db, "tem_exercito") == "1":
         return True
+    # II: tenta decidir pelo dorf1 que o ciclo já leu (sem navegar de novo).
+    if html_dorf1 is not None:
+        ex = exercito_no_dorf1(html_dorf1)
+        if ex is True:
+            meta_set(db, "tem_exercito", "1")
+            return True
+        if ex is False:
+            meta_set(db, "ultima_checagem_exercito", _agora())
+            return False                  # confirmado sem tropa -> não ataca
+    # dorf1 inconclusivo: cai no método antigo, com throttle de OASIS_CHECK_H.
     ult = meta_get(db, "ultima_checagem_exercito")
     horas = None
     if ult:
@@ -1155,6 +1353,7 @@ def agendar_imediato(db, nome):
 
 def _exec_script(nome, t, db, cfg):
     """Executa um script pelo nome (usado pelo slot imediato)."""
+    t.comentar("script: %s" % nome)              # VII: anota antes de executar
     if nome == "transferir_recursos":
         _, _, _, fez = t.transferir_recursos()
         # marca se foi inútil (herói vazio) p/ evoluir_controlado não reagendar
@@ -1167,11 +1366,42 @@ def _exec_script(nome, t, db, cfg):
     return "script desconhecido: %s" % nome
 
 
+def resumo_geral(t, db, html, acoes):
+    """Resumo legível ao FIM de cada ciclo (V): recursos do dorf1, obras em
+    andamento, próximo evento e o que o ciclo fez."""
+    linhas = ["== resumo %s ==" % rotulo_conta()]
+    try:
+        est = t.parse_estado(html)
+        e, c = est["estoque"], est["capacidade"]
+        linhas.append("recursos: " + "  ".join(
+            "%s %s/%s" % (nm[:3], e[nm], c[nm]) for nm in RECURSOS))
+    except Exception:
+        pass
+    agora = datetime.now(timezone.utc).astimezone()
+    obras = []
+    for dorf, fim in db.execute(
+            "SELECT dorf, fim FROM construcoes WHERE fim IS NOT NULL"):
+        try:
+            dt = datetime.fromisoformat(fim)
+            if dt > agora:
+                obras.append("dorf%s termina %s" % (dorf, dt.strftime("%H:%M")))
+        except Exception:
+            pass
+    linhas.append("obras: " + ("; ".join(obras) if obras else "fila livre"))
+    ex = "sim" if meta_get(db, "tem_exercito") == "1" else "não/desconhecido"
+    linhas.append("exército: " + ex)
+    seg = proximo_evento_seg(db)
+    linhas.append("próximo evento em ~%d min" % (seg // 60))
+    linhas.append("ações: " + acoes)
+    return "\n".join(linhas)
+
+
 def ciclo(t, db, cfg):
     """Uma passada do executor. Roda primeiro o script IMEDIATO (se houver),
     depois lê o dorf1 UMA vez e só age no que está pendente (indicadores) ou na
     hora certa (gates de horário no SQLite)."""
     log = []
+    t.titulo(rotulo_conta())                          # VI: rotula a janela
     # --- PRIORIDADE 1: próximo script imediato (one-shot, na frente de tudo) ---
     prox = meta_get(db, "proximo_imediato")
     if prox:
@@ -1181,21 +1411,25 @@ def ciclo(t, db, cfg):
 
     # --- OBRIGATÓRIOS (só agem se o indicador/condição manda) ---
     if re.search(r'id="questmasterButton"[^>]*\bclaimable\b', html):
+        t.comentar("recolher_missoes")                # VII
         n = t.recolher_missoes()
         if n:
             log.append("collect=%d" % n)
+    # I: só processa se houver relatório NÃO LIDO (indicador > 0) e, dentro da
+    # lista, só abre os rid que ainda não estão salvos (não relê os já lidos).
     rind = re.search(r'class="reports"[^>]*>\s*<div class="indicator">(\d+)', html)
     if rind and int(rind.group(1)) > 0:
-        reps = t.listar_relatorios()
-        for r in reps:
-            salvar_relatorio(db, t.ler_relatorio(r["rid"], r["s"]))
-        log.append("reports=%d" % len(reps))
+        t.comentar("ler_relatorios (%s não lidos)" % rind.group(1))  # VII
+        log.append("reports=%d" % recolher_relatorios(t, db))        # I
     if t.tem_tarefas_diarias(html):
+        t.comentar("tarefas_diarias")                 # VII
         dq = t.ler_tarefas_diarias()
         log.append("daily(reward=%s)" % dq["recompensa_disponivel"])
     if not t.heroi_em_aventura(html):
         if t.num_aventuras(html) > 0:
+            t.comentar("aventura")                    # VII
             log.append("aventura: %s" % t.fazer_aventura()[1])
+        t.comentar("evoluir_heroi")                   # VII
         okh, msgh = t.evoluir_heroi(cfg.get("HEROI_ATRIBUTO", "producao"))
         if okh:
             log.append("hero: %s" % msgh)
@@ -1206,9 +1440,11 @@ def ciclo(t, db, cfg):
     tribo = tribo_conta(t, db)
     if tribo and tribo.lower().startswith("romano"):
         for onde in ("dorf1", "dorf2"):
+            t.comentar("construir_%s" % onde)         # VII
             oke, msge = evoluir_controlado(t, db, onde, html, cfg)
             log.append("evolve %s: %s" % (onde, msge))
     else:
+        t.comentar("construir")                       # VII
         oke, msge = evoluir_controlado(t, db, None, html, cfg)
         log.append("evolve: %s" % msge)
 
@@ -1218,30 +1454,34 @@ def ciclo(t, db, cfg):
               - datetime.fromisoformat(ult)).total_seconds() / 3600
              if ult else None)
     if horas is None or horas >= 23:
+        t.comentar("scan_mapa")                       # VII
         nt, _no = t.escanear_mapa(db)
         meta_set(db, "ultimo_scan_mapa", _agora())
         log.append("scan(%d tiles)" % nt)
 
     # --- movimentos de tropas (salva horários p/ o próximo ciclo) ---
-    for mv in t.ler_movimentos():
+    movs = t.ler_movimentos()
+    for mv in movs:
         db.execute("INSERT INTO movimentos(ts,tipo,alvo,chegada,segundos,"
                    "detalhe) VALUES (?,?,?,?,?,?)",
                    (_agora(), mv["tipo"], mv["alvo"], mv["chegada"],
                     mv["segundos"], mv["detalhe"]))
+    if movs:
+        log.append("movs=%d" % len(movs))
     db.commit()
 
-    # --- assalto a oásis (agendado; aventura já rodou acima). Liga sozinho ao
-    # detectar exército (oasis_habilitado: cache meta['tem_exercito'], checagem
-    # 1x/OASIS_CHECK_H h enquanto não há tropa). ---
-    if oasis_habilitado(t, db, cfg):
+    # --- assalto a oásis (agendado; aventura já rodou acima). II: decide se há
+    # exército olhando o dorf1 já lido; só ataca quando há tropa. ---
+    if oasis_habilitado(t, db, cfg, html):
+        t.comentar("atacar_oasis")                    # VII
         oko, msgo = t.atacar_oasis(db, cfg)
         if "sem tropa" in msgo:        # exército acabou -> volta a checar depois
             meta_set(db, "tem_exercito", "")
         log.append("oasis: %s" % msgo)
 
-    resumo = "; ".join(log) if log else "nada pendente"
-    log_acao(db, "ciclo", True, resumo)
-    return resumo
+    acoes = "; ".join(log) if log else "nada pendente"
+    log_acao(db, "ciclo", True, acoes)
+    return resumo_geral(t, db, html, acoes)            # V: resumo geral
 
 
 def meta_get(db, chave):
@@ -1266,6 +1506,55 @@ def salvar_relatorio(db, rep):
         ",".join(cols), ",".join("?" * len(cols))),
         [rep.get(c) for c in cols])
     db.commit()
+
+
+def recolher_relatorios(t, db):
+    """Lê e salva os relatórios AINDA NÃO salvos (rid inédito) abrindo /report.
+    Devolve a quantidade de novos. Base do item I (no ciclo, gated pelo
+    indicador) e do XII (ao sair, recolher os ataques não lidos antes de
+    encerrar)."""
+    novos = 0
+    for r in t.listar_relatorios():            # listar_relatorios() abre /report
+        if db.execute("SELECT 1 FROM relatorios WHERE rid=?",
+                      (r["rid"],)).fetchone():
+            continue                           # já lido/salvo -> não reabre
+        salvar_relatorio(db, t.ler_relatorio(r["rid"], r["s"]))
+        novos += 1
+    return novos
+
+
+ESTRATEGIAS = ("sem_perdas", "agressivo", "defensivo")
+
+
+def _coord_tupla(s):
+    """(x, y) a partir de um texto de coordenada, ou None."""
+    m = re.search(r"(-?\d+)\D+(-?\d+)", s or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def montar_estrategia(db, cfg):
+    """XIII: ao iniciar, lê os dados de ataque do SQLite e monta a estratégia da
+    sessão. Modo vem de ESTRATEGIA no .env (padrão sem_perdas):
+      - sem_perdas: só ataca alvos SEM defesa (zero combate) e EVITA as coords
+        que o histórico de relatórios marca como arriscadas (defesa/perda);
+      - agressivo : ataca todo oásis livre, mesmo com defesa (aceita perdas);
+      - defensivo : procura não atacar.
+    Devolve {'modo', 'evitar': set((x,y)), 'analisados': n}."""
+    modo = str((cfg or {}).get("ESTRATEGIA", "sem_perdas")).strip().lower()
+    if modo not in ESTRATEGIAS:
+        modo = "sem_perdas"
+    evitar, n = set(), 0
+    for coord, tipo, perdas in db.execute(
+            "SELECT inimigo_coord, tipo, minhas_perdas FROM relatorios"):
+        if tipo not in ("ofensivo", "defensivo", "exploracao"):
+            continue
+        n += 1
+        teve_perda = perdas not in (None, "", "{}", "[]", "0")
+        if modo == "sem_perdas" and (teve_perda or tipo == "defensivo"):
+            xy = _coord_tupla(coord)
+            if xy:
+                evitar.add(xy)
+    return {"modo": modo, "evitar": evitar, "analisados": n}
 
 
 def _agora():
@@ -1294,6 +1583,13 @@ def main():
     t = Travian(base=base, email=email, senha=senha)
     db = abrir_db(conta_dir)
     ok, detalhe = True, ""
+    conferir_env_template(conta_dir)            # XIV: .env vs .env.template
+    # XIII: ao iniciar, lê os dados de ataque do SQLite e fixa a estratégia da
+    # sessão (vai em cfg['_estrategia']; usada por oasis_habilitado/atacar_oasis).
+    cfg["_estrategia"] = montar_estrategia(db, cfg)
+    print("== estratégia: %s (%d relatórios analisados, %d coords a evitar) =="
+          % (cfg["_estrategia"]["modo"], cfg["_estrategia"]["analisados"],
+             len(cfg["_estrategia"]["evitar"])))
 
     if cmd == "status":
         est = t.estado()
@@ -1362,9 +1658,21 @@ def main():
                 else:
                     seg = proximo_evento_seg(db)
                     print("  dormindo ~%d min até o próximo evento..." % (seg // 60))
+                # IV: enquanto dorme, sai do jogo (fica numa página neutra).
+                t.comentar("dormindo ~%d min" % (seg // 60))
+                t.enviar([{"type": "navigate", "value": "https://www.google.com"},
+                          {"type": "sleep", "value": 1}])
                 time.sleep(seg)
         except KeyboardInterrupt:
             print("\nloop parado.")
+        # XII: antes de encerrar, recolhe os relatórios (ataques) não lidos —
+        # alimenta o SQLite p/ a estratégia da próxima sessão (ver XIII).
+        try:
+            t.comentar("saindo: recolhendo relatórios não lidos")
+            n = recolher_relatorios(t, db)
+            print("  recolhidos %d relatório(s) antes de sair" % n)
+        except Exception as e:
+            print("  (não consegui recolher antes de sair: %s)" % e)
         db.close()
         return
     elif cmd == "movimentos":

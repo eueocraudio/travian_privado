@@ -8,8 +8,10 @@
 #          -> load_profile (do .tar.gz) -> reinicia -> LOGADO de novo
 #
 set -u
-PROF="$HOME/travian/profile"
-TAR="$HOME/travian/travian.tar.gz"
+# Perfil e backup vivem dentro do diretorio da conta (sobrescreviveis por env).
+CONTA="${TRAVIAN_CONTA:-$HOME/travian/account/ts6.x1.america.travian.com/wellington.aied}"
+PROF="${TRAVIAN_PROFILE:-$CONTA/profile}"
+TAR="${TRAVIAN_TAR:-$CONTA/travian.tar.gz}"
 PORT=9000
 PY=.venv/bin/python
 LOBBY="https://lobby.legends.travian.com/account"

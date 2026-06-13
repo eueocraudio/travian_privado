@@ -3,15 +3,20 @@
 Script de teste em tempo de execucao contra o browser em modo --servir.
 
 Fluxo (enviado pelo socket para o browser ja aberto):
-  1. tenta carregar ~/travian/travian.tar.gz (se nao existir, so avisa)
+  1. tenta carregar o travian.tar.gz da conta (se nao existir, so avisa)
   2. navega para o loginLobby do Travian
   3. informa usuario e senha
   4. clica no primeiro botao com class 'playNow'
-  5. le a URL atual; se chegou em dorf1.php, salva ~/travian/travian.tar.gz
+  5. le a URL atual; se chegou em dorf1.php, salva o travian.tar.gz da conta
+
+O perfil do browser e o backup .tar.gz ficam DENTRO do diretorio da conta:
+  ~/travian/account/<server>/<user>/{profile,travian.tar.gz}
+Sobrescreva o tarball com TRAVIAN_TAR (o iniciar.sh ja exporta esse caminho).
 
 Credenciais vem de variaveis de ambiente (nunca no arquivo):
     export TRAVIAN_EMAIL=...  TRAVIAN_PASSWORD=...
-    python3 browser.py --servir 9000 -d ~/travian/profile &
+    CONTA=~/travian/account/ts6.x1.america.travian.com/wellington.aied
+    python3 browser.py --servir 9000 -d "$CONTA/profile" &
     python3 teste_travian.py
 """
 
@@ -22,7 +27,9 @@ import sys
 from cliente import enviar
 
 PORTA = int(os.environ.get("PORTA", "9000"))
-TAR = "~/travian/travian.tar.gz"
+TAR = os.environ.get(
+    "TRAVIAN_TAR",
+    "~/travian/account/ts6.x1.america.travian.com/wellington.aied/travian.tar.gz")
 DORF1 = "https://ts6.x1.america.travian.com/dorf1.php"
 EMAIL = os.environ.get("TRAVIAN_EMAIL", "")
 SENHA = os.environ.get("TRAVIAN_PASSWORD", "")
