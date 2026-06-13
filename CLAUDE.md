@@ -109,14 +109,16 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
   43, override `MURO_GID`; protection time from `protecao_restante_seg()`); 2) in
   `agressivo`, ensure a Barracks (gid 19); 3) the **required structures**; 4) the
   base evolve/create-new fallback.
-- **Required structures (`ESTRUTURAS` in `.env`).** A `Nome(nível);...` list
-  (e.g. `Armazém(5);Embaixada(1);Ponto de Encontro(5);Celeiro(5);Esconderijo(10);
-  Muralha(3)`). `evoluir_estruturas()` evolves them **uniformly**: each step it
-  picks the one **furthest from its target** (largest target−level deficit) and
-  upgrades/builds one level. Names map to official Travian gids via
-  `GID_POR_NOME` (accent/locale-tolerant `_norm`); Muro/Muralha resolves the
-  wall gid by tribe. Rally Point (slot 39) and Wall (slot 40) are fixed slots.
-  `ESTRUTURAS_PADRAO` is the default — this replaced the old probabilistic
+- **Required structures (`ESTRUTURAS` in `.env`).** A `ref(nível);...` list where
+  **`ref` is the building ID** (the game's `gid`, as in `build.php?gid=<ID>`) —
+  IDs are deterministic and preferred; a name is also accepted (resolved via
+  `GID_POR_NOME`, accent/locale-tolerant `_norm`) for convenience. Default:
+  `10(5);18(1);16(5);11(5);23(10);31(3)`. Any wall gid (31/32/33/42/43) or
+  Muro/Muralha resolves to the tribe's wall; unknown IDs are ignored.
+  `NOME_POR_GID` gives canonical PT names for logs. `evoluir_estruturas()`
+  evolves them **uniformly**: each step it upgrades/builds one level of the one
+  **furthest from its target** (largest target−level deficit). Rally Point (slot
+  39) and Wall (slot 40) are fixed slots. This replaced the old probabilistic
   cranny ramp.
 - **Attack strategy (`ESTRATEGIA` in `.env`).** `montar_estrategia()` runs once
   at startup (`main`), reading the `relatorios` table, and stores the result in

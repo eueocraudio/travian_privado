@@ -1311,12 +1311,24 @@ def prob_esconderijo(db, html):
 
 
 # --- ESTRUTURAS obrigatórias (item I): nome -> gid oficial do Travian.
-# gids confirmados na árvore de edifícios do Travian; aceita aliases por
-# idioma/acento (normalizados por _norm). Muro/Muralha usam o gid da tribo.
+# O gid é o MESMO que o jogo usa na querystring 'build.php?id=<slot>&gid=<gid>'
+# (fonte definitiva). Nomes oficiais PT (PT-PT/PT-BR) + EN como aliases,
+# normalizados por _norm. Muro/Muralha resolvem o gid pela tribo.
 GID_POR_NOME = {
+    # campos de recurso (dorf1) — geralmente não vão em ESTRUTURAS, mas mapeados:
+    "bosque": 1, "cortador de madeira": 1, "cortador de lenha": 1, "woodcutter": 1,
+    "poco de argila": 2, "clay pit": 2,
+    "mina de ferro": 3, "iron mine": 3,
+    "campo de cereais": 4, "campo de trigo": 4, "quinta de cereais": 4, "cropland": 4,
+    # infraestrutura / militar (dorf2):
+    "serracao": 5, "serraria": 5, "sawmill": 5,
+    "olaria": 6, "fabrica de tijolos": 6, "brickyard": 6,
+    "fundicao": 7, "fundicao de ferro": 7, "iron foundry": 7,
+    "moinho": 8, "grain mill": 8,
+    "padaria": 9, "bakery": 9,
     "armazem": 10, "warehouse": 10,
     "celeiro": 11, "silo": 11, "granary": 11,
-    "ferraria": 13, "armaria": 13, "armoury": 13, "blacksmith": 12,
+    "ferraria": 13, "armaria": 13, "forja": 13, "smithy": 13, "armoury": 13,
     "praca de torneios": 14, "tournament square": 14,
     "edificio principal": 15, "predio principal": 15, "main building": 15,
     "ponto de encontro": 16, "ponto de reuniao": 16,
@@ -1325,23 +1337,51 @@ GID_POR_NOME = {
     "embaixada": 18, "embassy": 18,
     "quartel": 19, "barracks": 19,
     "estabulo": 20, "cavalarica": 20, "stable": 20,
-    "oficina": 21, "manufatura de equipamento": 21, "workshop": 21,
+    "oficina": 21, "manufatura de equipamento de cerco": 21, "workshop": 21,
     "academia": 22, "academy": 22,
     "esconderijo": 23, "cranny": 23,
-    "prefeitura": 24, "town hall": 24, "townhall": 24,
+    "camara municipal": 24, "prefeitura": 24, "town hall": 24, "townhall": 24,
     "residencia": 25, "residence": 25,
     "palacio": 26, "palace": 26,
     "tesouro": 27, "camara do tesouro": 27, "treasury": 27,
-    "escritorio comercial": 28, "posto de comercio": 28, "trade office": 28,
+    "posto comercial": 28, "escritorio comercial": 28, "posto de comercio": 28,
+    "trade office": 28,
+    "grande quartel": 29, "great barracks": 29,
+    "grande estabulo": 30, "great stable": 30,
+    "cantaria": 34, "pedreiro": 34, "stonemason": 34,
+    "cervejaria": 35, "brewery": 35,
+    "armadilheiro": 36, "trapper": 36,
     "mansao do heroi": 37, "hero's mansion": 37, "heros mansion": 37,
+    "bebedouro": 41, "bebedouro para cavalos": 41, "horse drinking trough": 41,
+    "centro de comando": 45, "command center": 45,
+    "estacao de aguas": 46, "aqueduto": 46, "waterworks": 46,
 }
-MUROS_NOME = {"muro", "muralha", "palicada", "muralha de terra",
-              "muralha de pedra", "muralha de estacas", "muralha improvisada",
-              "city wall", "earth wall", "palisade", "stone wall", "wall"}
+# Muros: nome -> tratado por gid_muro(tribo). Inclui os nomes por tribo.
+MUROS_NOME = {"muro", "muralha", "muralha de terra", "palicada de terra",
+              "palicada", "muralha de pedra", "muralha de estacas",
+              "muralha improvisada", "muro improvisado",
+              "city wall", "earth wall", "palisade", "stone wall",
+              "makeshift wall", "wall"}
 GIDS_MURO = (31, 32, 33, 42, 43)
-# Valor padrão (nomes oficiais já corrigidos a partir da árvore do Travian).
-ESTRUTURAS_PADRAO = ("Armazém(5);Embaixada(1);Ponto de Encontro(5);"
-                     "Celeiro(5);Esconderijo(10);Muralha(3)")
+# gid -> nome canônico PT (para logs legíveis quando ESTRUTURAS usa só o ID).
+NOME_POR_GID = {
+    1: "Bosque", 2: "Poço de Argila", 3: "Mina de Ferro", 4: "Campo de Cereais",
+    5: "Serração", 6: "Olaria", 7: "Fundição", 8: "Moinho", 9: "Padaria",
+    10: "Armazém", 11: "Celeiro", 13: "Ferraria", 14: "Praça de Torneios",
+    15: "Edifício Principal", 16: "Ponto de Encontro", 17: "Mercado",
+    18: "Embaixada", 19: "Quartel", 20: "Estábulo", 21: "Oficina",
+    22: "Academia", 23: "Esconderijo", 24: "Câmara Municipal", 25: "Residência",
+    26: "Palácio", 27: "Tesouro", 28: "Posto Comercial", 29: "Grande Quartel",
+    30: "Grande Estábulo", 31: "Muralha", 32: "Muralha de Terra", 33: "Paliçada",
+    34: "Cantaria", 35: "Cervejaria", 36: "Armadilheiro", 37: "Mansão do Herói",
+    38: "Grande Armazém", 39: "Grande Celeiro", 40: "Maravilha do Mundo",
+    41: "Bebedouro", 42: "Muralha de Pedra", 43: "Muralha de Estacas",
+    45: "Centro de Comando", 46: "Estação de Águas",
+}
+# Valor padrão POR ID (gid do jogo — determinístico). Equivale a: 10=Armazém,
+# 18=Embaixada, 16=Ponto de Encontro, 11=Celeiro, 23=Esconderijo, 31=Muralha
+# (qualquer gid de muro resolve para o da tribo).
+ESTRUTURAS_PADRAO = "10(5);18(1);16(5);11(5);23(10);31(3)"
 
 
 def _norm(s):
@@ -1352,9 +1392,11 @@ def _norm(s):
 
 
 def parse_estruturas(cfg, tribo=None):
-    """Lê ESTRUTURAS='Nome(nivel);...' do .env -> [(gid, nome, alvo)] (item I).
-    Nomes são tolerantes a acento/idioma; 'Muro/Muralha' resolvem pelo gid da
-    tribo. Itens não reconhecidos são ignorados."""
+    """Lê ESTRUTURAS do .env -> [(gid, nome, alvo)] (item I). Cada item é
+    'ID(nível)' (RECOMENDADO — o ID é o gid do jogo, determinístico) ou
+    'Nome(nível)' (conveniência, resolvido por GID_POR_NOME, tolerante a
+    acento/idioma). IDs de muro (31/32/33/42/43) e 'Muro/Muralha' resolvem o gid
+    pela tribo. Itens inválidos/desconhecidos são ignorados."""
     cfg = cfg or {}
     bruto = cfg.get("ESTRUTURAS") or ESTRUTURAS_PADRAO
     out = []
@@ -1362,11 +1404,18 @@ def parse_estruturas(cfg, tribo=None):
         m = re.match(r"\s*(.+?)\s*\(\s*(\d+)\s*\)\s*$", item)
         if not m:
             continue
-        nome, alvo = m.group(1).strip(), int(m.group(2))
-        chave = _norm(nome)
-        gid = gid_muro(tribo, cfg) if chave in MUROS_NOME else GID_POR_NOME.get(chave)
+        ref, alvo = m.group(1).strip(), int(m.group(2))
+        if ref.isdigit():                         # ID direto (preferido)
+            gid = int(ref)
+            if gid in GIDS_MURO:                  # qualquer muro -> o da tribo
+                gid = gid_muro(tribo, cfg)
+            elif gid not in NOME_POR_GID:         # gid inexistente -> ignora
+                continue
+        else:                                     # nome (conveniência)
+            ch = _norm(ref)
+            gid = gid_muro(tribo, cfg) if ch in MUROS_NOME else GID_POR_NOME.get(ch)
         if gid:
-            out.append((gid, nome, alvo))
+            out.append((gid, NOME_POR_GID.get(gid, "gid %d" % gid), alvo))
     return out
 
 
