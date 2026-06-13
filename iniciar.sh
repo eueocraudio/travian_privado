@@ -13,11 +13,14 @@
 set -u
 
 REPO="$HOME/desenv/craudiowebot"
-RAIZ="$HOME/travian"
+RAIZ="$HOME/desenv/travian_privado"
 PY="$REPO/.venv/bin/python"
 PORTA=9000
 PROFILE="$RAIZ/profile"
 export DISPLAY="${DISPLAY:-:0}"
+# libxcb-cursor0 (exigida pelo Qt >=6.5) ficou fora do path padrão neste
+# Debian/Qubes; aponta o linker pra ela senão o plugin 'xcb' não carrega.
+LIBXCB="$HOME/.cache/unuser/lib"
 # conta (servidor/usuário); travian.py também resolve sozinho se só houver uma
 export TRAVIAN_ACCOUNT="${TRAVIAN_ACCOUNT:-ts6.x1.america.travian.com/wellington.aied}"
 
@@ -35,7 +38,8 @@ subir_browser() {
     return 0
   fi
   echo "==> iniciando browser servidor (DISPLAY=$DISPLAY, perfil $PROFILE)"
-  ( cd "$REPO" && nohup "$PY" browser.py --servir "$PORTA" -d "$PROFILE" \
+  ( cd "$REPO" && LD_LIBRARY_PATH="$LIBXCB:${LD_LIBRARY_PATH:-}" \
+      nohup "$PY" browser.py --servir "$PORTA" -d "$PROFILE" \
       >/tmp/travian_browser.log 2>&1 & )
   for _ in $(seq 1 40); do
     porta_no_ar && { echo "    pronto."; return 0; }

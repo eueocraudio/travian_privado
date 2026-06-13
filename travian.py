@@ -2,37 +2,39 @@
 """
 travian.py — automação do Travian sobre o craudiowebot (modo --servir).
 
-Pré-requisito: o browser rodando como servidor, com a janela visível:
+Pré-requisito: o browser rodando como servidor (ver iniciar.sh):
 
-    DISPLAY=:0 .venv/bin/python browser.py --servir 9000 -d ~/travian/profile
+    DISPLAY=:0 .venv/bin/python browser.py --servir 9000 -d <perfil>
 
 Este módulo fala com esse servidor por socket (NDJSON) e implementa a lógica
-de jogo aprendida em ~/travian/docs/:
+de jogo aprendida em docs/. O executor (ciclo/loop) tem 3 níveis de prioridade
+de scripts (ver o registro SCRIPTS abaixo):
+  1) IMEDIATO  — slot one-shot meta['proximo_imediato'] (ex.: transferir após
+     um build falhar por falta de recurso); roda na frente de tudo no ciclo;
+  2) AGENDADOS — disparam por horário/evento (gate de tempo no SQLite): obras
+     de dorf1/dorf2, scan do mapa (1x/dia), transferir, esconderijo, oásis;
+  3) LOOP      — a cada ciclo: missões, relatórios, tarefas diárias, herói
+     (aventura + atributos), movimentos de tropa.
 
-  - recolhe TODAS as recompensas de missão disponíveis: no Travian atual NÃO
-    há limite de armazenamento para recompensa (os recursos vão para o herói,
-    a "barra azul" ao lado do personagem) — se há recompensa, recolhe direto;
-  - lê estoque e capacidade só para relatório (não gate de nada);
-  - REGRA: 1 obra por vez em dorf2 (edifícios) e 1 em dorf1 (campos) — filas
-    separadas; a função de construir detecta se a obra entrou ou não;
-  - constrói Celeiro/Armazém, sobe campos de recurso, e relata as tarefas.
+Construção: NÃO navega à tela de construção se o SQLite mostra obra em
+andamento naquele dorf (fim ainda no futuro); a fila de construção do jogo é
+GLOBAL, então fim_construcao classifica cada item por nome (campo x edifício).
 
 Multi-server / multi-user. Cada conta vive em:
     account/<servidor>/<usuario>/
-        .env            -> TRAVIAN_BASE, TRAVIAN_EMAIL, TRAVIAN_PASSWORD
-        travian.sqlite  -> histórico (tabelas 'acoes' e 'estado')
+        .env            -> TRAVIAN_BASE/EMAIL/PASSWORD + config (HEROI_ATRIBUTO,
+                           DORF2_PCT_NOVO, DORF2_NOVOS, CRANNY_NIVEL_ALVO,
+                           OASIS_ATIVO, OASIS_HEROI_OBRIGATORIO)
+        travian.sqlite  -> histórico (acoes, estado, construcoes, oasis, ...)
 A conta é escolhida por TRAVIAN_ACCOUNT="<servidor>/<usuario>"; se houver só
 uma conta, é usada automaticamente. Todo comando é registrado no SQLite.
 
-Uso:
-    python3 travian.py status      # recursos/capacidade/missões (+ snapshot no DB)
-    python3 travian.py collect     # recolhe todas as recompensas (vão p/ o herói)
-    python3 travian.py transfer    # herói -> armazém/celeiro (máx 80%)
-    python3 travian.py adventure   # manda o herói (vida>50%, não está fora, n>0)
-    python3 travian.py evolve [dorf1|dorf2]   # sobe o de menor nível (aleatório)
-    python3 travian.py storage     # constrói Celeiro e Armazém se faltarem
-    python3 travian.py login       # loga no servidor de jogo
-    python3 travian.py upgrade <slot> <gid>   # sobe um campo/edifício específico
+Uso: python3 travian.py <comando>
+    status | login | collect | storage | adventure | transfer | hero [estrat]
+    evolve [dorf1|dorf2] | upgrade <slot> <gid>
+    daily | reports | scan [force] | movimentos | oasis
+    ciclo            # uma passada do executor
+    loop             # executor contínuo (dorme até o próximo evento)
 
     # outra conta:  TRAVIAN_ACCOUNT="ts6.x1.america.travian.com/wellington.aied" \\
     #               python3 travian.py status
@@ -59,13 +61,41 @@ BASE = os.environ.get("TRAVIAN_BASE", "https://ts6.x1.america.travian.com")
 EMAIL = os.environ.get("TRAVIAN_EMAIL", "")
 SENHA = os.environ.get("TRAVIAN_PASSWORD", "")
 
-# gid dos campos de recurso e de alguns edifícios
-GID_CAMPO = {"madeira": 1, "barro": 2, "ferro": 3, "cereal": 4}
+# gid dos edifícios de armazenamento (usados em garantir_armazenamento)
 GID_CELEIRO = 11
 GID_ARMAZEM = 10
-GID_EMBAIXADA = 18
 RECURSOS = ["madeira", "barro", "ferro", "cereal"]
 IDS_ESTOQUE = {"madeira": "l1", "barro": "l2", "ferro": "l3", "cereal": "l4"}
+
+# Registro de TODOS os scripts (tarefas) do bot. Prioridade (maior -> menor):
+#   1) IMEDIATO  -> slot one-shot meta['proximo_imediato']; roda já no próximo
+#                   ciclo, na frente de tudo (agendar_imediato(db, "nome")).
+#   2) "agendado"-> dispara em horário/evento (gate de tempo).
+#   3) "loop"    -> roda a cada passada do ciclo().
+# 'feito' = já implementado em travian.py; False = planejado (ainda não existe).
+SCRIPTS = {
+    # ---- agendados (prioridade sobre os de loop) ----
+    "construir_dorf1": {"tipo": "agendado", "feito": True},   # subir campo
+    "construir_dorf2": {"tipo": "agendado", "feito": True},   # subir edifício
+    "scan_mapa":       {"tipo": "agendado", "feito": True},   # 1x/dia
+    # dispara +1min DEPOIS de um build (dorf1/dorf2) falhar por FALTA DE
+    # RECURSO — leva recurso do herói p/ o depósito e a obra entra no próximo
+    # ciclo. NÃO roda todo ciclo (era 'loop'; reclassificado para agendado).
+    "transferir_recursos": {"tipo": "agendado", "feito": True},
+    # esconderijo: realizado DENTRO de construir_dorf2 (decidir_dorf2). Rampa
+    # probabilística "na sorte" sobe com o fim da proteção; alvo ~2000 de cap.
+    "esconderijo":     {"tipo": "agendado", "feito": True},
+    # atacar_oasis: assalto a oásis sem defesa (gated por OASIS_ATIVO no .env;
+    # aventura SEMPRE roda antes no ciclo). Conservador: só sem_tropas=1.
+    "atacar_oasis":    {"tipo": "agendado", "feito": True},
+    # ---- loop (a cada ciclo) ----
+    "recolher_missoes":  {"tipo": "loop", "feito": True},
+    "ler_relatorios":    {"tipo": "loop", "feito": True},
+    "tarefas_diarias":   {"tipo": "loop", "feito": True},
+    "aventura":          {"tipo": "loop", "feito": True},
+    "evoluir_heroi":     {"tipo": "loop", "feito": True},
+    "ler_movimentos":    {"tipo": "loop", "feito": True},
+}
 
 
 def _num(s):
@@ -235,12 +265,6 @@ class Travian:
         self.enviar(acts)
         return True, "%d ponto(s) -> %s" % (n, estrategia)
 
-    # ---- fila de construção (1 por dorf) ------------------------------
-    def fila_ocupada(self, dorf):
-        """True se já há obra na fila daquele dorf (1=campos, 2=edifícios)."""
-        _, html = self.ir(self.base + ("/dorf%d.php" % dorf), 4)
-        return "buildingList" in html
-
     # ---- construir / evoluir ------------------------------------------
     def construir(self, slot, gid, categoria=1):
         """Constrói/sobe o edifício 'gid' no 'slot'. Detecta se a obra entrou
@@ -329,6 +353,61 @@ class Travian:
             alvo["nome"], alvo["slot"], menor, menor + 1,
             "construindo" if ok else "fila cheia / sem recursos")
 
+    def criar_novo_dorf2(self, gids_desejados):
+        """Constrói o 1º edifício DESEJADO (por gid, em ordem de prioridade) que
+        ainda NÃO existe no dorf2, no primeiro slot vazio. É aqui que o
+        esconderijo (gid 23) entra como edifício novo."""
+        _, html = self.ir(self.base + "/dorf2.php", 4)
+        existentes = {e["gid"] for e in self.edificios_dorf2(html)}
+        slot = self._primeiro_slot_vazio(html)
+        if slot is None:
+            return False, "sem slot vazio"
+        for gid in gids_desejados:
+            if gid in existentes:
+                continue
+            ok = self.construir(slot, gid)
+            return ok, "novo gid %d no slot %d (%s)" % (
+                gid, slot, "construindo" if ok else "recusado")
+        return False, "todos os desejados já existem"
+
+    def construir_ou_evoluir_dorf2(self, cfg):
+        """Decisão do dorf2: EVOLUIR um edifício existente OU CRIAR um novo.
+        Com chance DORF2_PCT_NOVO (%) tenta criar um novo da lista DORF2_NOVOS
+        (gids, prioridade); senão evolui o de menor nível. Se 'criar' não rolar
+        (slot/recusa), cai para evoluir. (A rampa % do esconderijo pluga aqui.)"""
+        cfg = cfg or {}
+        pct = float(cfg.get("DORF2_PCT_NOVO", "0"))   # 0 = só evoluir (base inerte)
+        gids = [int(x) for x in re.split(r"[,\s]+",
+                cfg.get("DORF2_NOVOS", "18,23,17").strip()) if x]
+        if random.random() * 100 < pct:
+            ok, msg = self.criar_novo_dorf2(gids)
+            if ok:
+                return ok, "criar -> " + msg
+            evok, evmsg = self.evoluir_dorf2()
+            return evok, "criar n/d (%s) -> evoluir: %s" % (msg, evmsg)
+        evok, evmsg = self.evoluir_dorf2()
+        return evok, "evoluir -> " + evmsg
+
+    def subir_ou_criar_esconderijo(self, nivel_alvo=10):
+        """Esconderijo (gid 23): sobe o existente (o de menor nível) ou cria um
+        em slot vazio. Para no nível-alvo (capacidade ~2000; Romano ~200/nível
+        -> nível 10). Devolve (ok, msg)."""
+        _, html = self.ir(self.base + "/dorf2.php", 4)
+        esc = [e for e in self.edificios_dorf2(html) if e["gid"] == 23]
+        if esc:
+            if max(e["nivel"] for e in esc) >= nivel_alvo:
+                return False, "no alvo (nível>=%d)" % nivel_alvo
+            alvo = min(esc, key=lambda e: e["nivel"])
+            ok = self._subir_verde(alvo["slot"], 23)
+            return ok, "subir slot %d nível %d->%d (%s)" % (
+                alvo["slot"], alvo["nivel"], alvo["nivel"] + 1,
+                "construindo" if ok else "recusado")
+        slot = self._primeiro_slot_vazio(html)
+        if slot is None:
+            return False, "sem slot vazio"
+        ok = self.construir(slot, 23)
+        return ok, "criar slot %d (%s)" % (slot, "construindo" if ok else "recusado")
+
     def evoluir(self, onde=None):
         """Evolui: 'dorf1' (campo), 'dorf2' (edifício) ou aleatório (None)."""
         onde = onde or random.choice(["dorf1", "dorf2"])
@@ -362,14 +441,33 @@ class Travian:
         m = re.search(r'value="([^"]+)"\s+name="villageName"', html)
         return m.group(1).strip() if m else "?"
 
-    def fim_construcao(self, dorf):
-        """ISO de quando a ÚLTIMA obra na fila do dorf termina (agora + maior
-        timer da buildingList), ou None se a fila está vazia."""
-        _, html = self.ir(self.base + "/dorf%d.php" % dorf, 3)
-        ql = re.search(r'class="buildingList"(.*?)</div>\s*</div>\s*</div>',
-                       html, re.S)
-        segs = [int(s) for s in re.findall(
-            r'class="timer"[^>]*value="(\d+)"', ql.group(1) if ql else "")]
+    def fim_construcao(self, dorf, html=None):
+        """ISO de quando a obra do DORF pedido termina (campos=1, edifícios=2),
+        ou None se aquele dorf não tem obra na fila.
+
+        A buildingList é GLOBAL (lista campos E edifícios juntos, igual nas duas
+        páginas) e cada item só traz o NOME — sem slot/gid. Então classifico
+        pelo nome: se bate com um edifício do dorf2 (edificios_dorf2) é obra de
+        edifício; senão é campo. Assim o 'fim' do dorf1 não herda mais o horário
+        de uma obra do dorf2 (bug do agendamento por horário)."""
+        if html is None:
+            _, html = self.ir(self.base + "/dorf1.php", 3)
+        m = re.search(r'class="buildingList".*?</div>\s*</div>\s*</div>',
+                      html, re.S)
+        if not m:
+            return None
+        itens = re.findall(
+            r'class="name">\s*(.*?)\s*<span class="lvl".*?value="(\d+)"',
+            m.group(0), re.S)
+        if not itens:
+            return None
+        nomes_d2 = {e["nome"].strip() for e in self.edificios_dorf2()}
+        segs = []
+        for nome, val in itens:
+            nome = re.sub(r"<[^>]+>", "", nome).strip()
+            eh_edificio = nome in nomes_d2
+            if (dorf == 2) == eh_edificio:   # dorf2&edifício ou dorf1&campo
+                segs.append(int(val))
         if not segs:
             return None
         fim = datetime.now(timezone.utc).astimezone() + timedelta(seconds=max(segs))
@@ -493,6 +591,101 @@ class Travian:
                          "detalhe": txt[:150]})
         return movs
 
+    # ---- assalto a oásis (raid) ---------------------------------------
+    # Página de envio: build.php?id=39&gid=16&tt=2. Inputs troop[t1..t11]
+    # (t11=herói, ativo só com herói em casa); eventType value=4 = Assalto;
+    # #ok = Enviar -> #confirmSendTroops = Confirmar. Regras no doc oasis-mapa.
+    def tropas_disponiveis_ataque(self, html=None):
+        """Tropas que dá para enviar AGORA (inputs troop[tN] ATIVOS, não
+        disabled) e quanto há de cada (lê o número logo após o input).
+        Devolve (dict {tN: max|None}, html). t11 = herói."""
+        if html is None:
+            _, html = self.ir(self.base + "/build.php?id=39&gid=16&tt=2", 5)
+        disp = {}
+        for mm in re.finditer(r'<input[^>]*name="troop\[(t\d+)\]"[^>]*>', html):
+            if "disabled" in mm.group(0):
+                continue
+            cauda = re.sub(r"<[^>]+>", " ", html[mm.end():mm.end() + 280])
+            m2 = re.search(r"(\d[\d.‭‬]*)", cauda)
+            disp[mm.group(1)] = _num(m2.group(1)) if m2 else None
+        return disp, html
+
+    def _enviar_assalto(self, x, y, tropas, mandar_heroi):
+        """Preenche destino + tropas (força máxima), marca Assalto (eventType=4),
+        Enviar e Confirmar. 'tropas' = {tN: qtd}. True se mandou algo."""
+        acts = [
+            {"type": "navigate",
+             "value": self.base + "/build.php?id=39&gid=16&tt=2"},
+            {"type": "sleep", "value": 4},
+            {"type": "key", "xpath": '//input[@id="xCoordInput"]', "value": str(x)},
+            {"type": "sleep", "value": SLEEP_TOQUE},
+            {"type": "key", "xpath": '//input[@id="yCoordInput"]', "value": str(y)},
+            {"type": "sleep", "value": SLEEP_TOQUE},
+        ]
+        enviou = False
+        for tn, q in tropas.items():
+            if tn == "t11" or not q or q <= 0:
+                continue
+            acts.append({"type": "key",
+                         "xpath": '//input[@name="troop[%s]"]' % tn,
+                         "value": str(q)})
+            acts.append({"type": "sleep", "value": SLEEP_TOQUE})
+            enviou = True
+        if mandar_heroi and "t11" in tropas:
+            acts.append({"type": "key",
+                         "xpath": '//input[@name="troop[t11]"]', "value": "1"})
+            acts.append({"type": "sleep", "value": SLEEP_TOQUE})
+            enviou = True
+        if not enviou:
+            return False
+        acts += [
+            {"type": "click",
+             "xpath": '//input[@name="eventType" and @value="4"]'},  # Assalto
+            {"type": "sleep", "value": 2},
+            {"type": "click", "xpath": '//*[@id="ok"]'},             # Enviar
+            {"type": "sleep", "value": 3},
+            {"type": "click", "xpath": '//*[@id="confirmSendTroops"]'},  # Confirmar
+            {"type": "sleep", "value": 3},
+        ]
+        self.enviar(acts)
+        return True
+
+    def atacar_oasis(self, db, cfg):
+        """Assalto a um oásis (AGENDADO; aventura roda ANTES no ciclo).
+        Conservador: só DESOCUPADO e SEM DEFESA (sem_tropas=1), re-conferindo a
+        defesa na hora (animais nascem). Manda força máxima das tropas em casa;
+        herói entra se OASIS_HEROI_OBRIGATORIO=false e estiver em casa."""
+        cfg = cfg or {}
+        heroi_obrig = str(cfg.get("OASIS_HEROI_OBRIGATORIO", "true")).strip(
+            ).lower() in ("1", "true", "sim", "yes")
+        disp, _ = self.tropas_disponiveis_ataque()
+        tem_heroi = "t11" in disp
+        exercito = {tn: q for tn, q in disp.items() if tn != "t11"}
+        mandar_heroi = tem_heroi and not heroi_obrig
+        if not exercito and not mandar_heroi:
+            return False, ("sem tropa p/ assalto"
+                           + ("" if tem_heroi else " (herói fora)"))
+        alvos = db.execute(
+            "SELECT x,y,distancia FROM oasis WHERE ocupado=0 AND sem_tropas=1 "
+            "ORDER BY distancia ASC LIMIT 5").fetchall()
+        if not alvos:
+            return False, "sem oásis livre/sem-defesa no DB (rode 'scan')"
+        for x, y, dist in alvos:
+            det = self.oasis_detalhe(x, y)          # re-confere defesa AGORA (XHR)
+            if det:
+                db.execute("UPDATE oasis SET ocupado=?, sem_tropas=? "
+                           "WHERE x=? AND y=?",
+                           (det["ocupado"], det["sem_tropas"], x, y))
+                db.commit()
+            if det and det["ocupado"] == 0 and det["sem_tropas"] == 1:
+                tropas = dict(exercito)
+                if mandar_heroi:
+                    tropas["t11"] = 1
+                ok = self._enviar_assalto(x, y, tropas, mandar_heroi)
+                return ok, ("assalto -> (%d|%d) dist %.1f" % (x, y, dist)
+                            if ok else "falha ao enviar p/ (%d|%d)" % (x, y))
+        return False, "oásis candidatos ganharam defesa; nada enviado"
+
     # ---- tarefas diárias (daily quests) -------------------------------
     def tem_tarefas_diarias(self, html=None):
         """True se o botão dailyQuests está com indicador (o '!')."""
@@ -564,18 +757,6 @@ class Travian:
         return rep
 
     # ---- armazenamento -------------------------------------------------
-    def slots_vazios(self):
-        """Slots do centro da aldeia (dorf2) sem edifício (gid 0)."""
-        _, html = self.ir(self.base + "/dorf2.php", 4)
-        vazios = []
-        for m in re.finditer(r'buildingSlot(\d+)"[^>]*data-aid="(\d+)"', html):
-            pass
-        # parsing tolerante: pega aid e gid pelo bloco do slot
-        for m in re.finditer(r'data-aid="(\d+)"[^>]*class="[^"]*buildingSlot[^"]*"', html):
-            pass
-        # fallback simples: lista 19..40 que não têm gXX != 0 (uso aproximado)
-        return vazios
-
     def garantir_armazenamento(self):
         """Constrói Celeiro e Armazém em slots vazios se ainda não existem."""
         feitos = []
@@ -593,15 +774,16 @@ class Travian:
         return feitos
 
     def _primeiro_slot_vazio(self, html_dorf2):
-        ocupados = set()
-        for m in re.finditer(r'buildingSlot(\d+)\b[^"]*"', html_dorf2):
-            seg = html_dorf2[m.start():m.start() + 200]
-            if re.search(r"\bg([1-9]\d*)\b", seg):
-                ocupados.add(int(m.group(1)))
-        for s in range(19, 41):
-            if s not in ocupados:
-                return s
-        return None
+        """1º slot livre (data-gid='0') do dorf2 para edifício NORMAL (19..38;
+        exclui 39=ponto de reunião e 40=muralha). Os slots têm
+        data-aid="<slot>" data-gid="<gid|0>"."""
+        livres = []
+        for m in re.finditer(r'data-aid="(\d+)"[^>]*?data-gid="(\d+)"',
+                             html_dorf2):
+            aid, gid = int(m.group(1)), int(m.group(2))
+            if gid == 0 and 19 <= aid <= 38:
+                livres.append(aid)
+        return min(livres) if livres else None
 
     # ---- missões -------------------------------------------------------
     def _conta_collect(self, html):
@@ -809,23 +991,101 @@ def pode_construir(db, aldeia, dorf):
     return (agora >= fim), row[0]
 
 
-def evoluir_controlado(t, db, onde=None):
-    """Evolui com gate no SQLite: só constrói no dorf se o fim da última obra
-    daquele dorf (registrada) já passou; ao construir, registra o novo fim."""
+def _transfer_seria_inutil(db, janela=1800):
+    """True se a última transferência herói->depósito foi INÚTIL (herói vazio)
+    há menos de 'janela' s. Serve para NÃO reagendar transferir_recursos à toa
+    (evita o ping-pong de reload a cada 60s quando não há o que transferir)."""
+    v = meta_get(db, "transfer_vazio")
+    if not v:
+        return False
+    try:
+        dt = datetime.fromisoformat(v)
+        return (datetime.now(dt.tzinfo) - dt).total_seconds() < janela
+    except Exception:
+        return False
+
+
+def evoluir_controlado(t, db, onde=None, html_dorf1=None, cfg=None):
+    """Constrói/evolui um dorf (script AGENDADO). Regra do usuário: NEM navega
+    para a tela de construção se o SQLite (tabela construcoes) mostra que, por
+    horário, a obra anterior daquele dorf ainda não terminou — evita reload à
+    toa. Quando a fila está livre, tenta subir; se a obra NÃO entra (fila livre
+    porém sem recurso), agenda transferir_recursos no PROXIMO_SCRIPT_IMEDIATO.
+    No dorf2 a escolha é evoluir existente OU criar novo (esconderijo etc.)."""
     onde = onde or random.choice(["dorf1", "dorf2"])
     dorf = 1 if onde == "dorf1" else 2
-    aldeia = t.nome_aldeia()
+    aldeia = t.nome_aldeia(html_dorf1)          # usa o html do ciclo (sem reload)
     livre, fim = pode_construir(db, aldeia, dorf)
     if not livre:
-        return False, "%s: obra anterior só termina %s (aguardando)" % (onde, fim)
-    ok, msg = t.evoluir_dorf1() if dorf == 1 else t.evoluir_dorf2()
+        return False, "%s: ainda construindo até %s (não navega)" % (onde, fim)
+    ok, msg = (t.evoluir_dorf1() if dorf == 1
+               else decidir_dorf2(t, db, cfg, html_dorf1))
     if ok:
         fimc = t.fim_construcao(dorf)
         db.execute("INSERT INTO construcoes(ts,aldeia,dorf,fim,item) "
                    "VALUES (?,?,?,?,?)", (_agora(), aldeia, dorf, fimc, msg))
         db.commit()
         msg += " | fim=%s" % fimc
+    elif _transfer_seria_inutil(db):
+        # fila livre mas sem recurso, e o herói está vazio (transfer recente foi
+        # inútil) -> NÃO reagenda transferir (deixa o loop dormir normal).
+        msg += " | sem recurso (herói vazio há pouco; não reagenda)"
+    else:
+        # fila livre (gate ok) mas a obra não entrou -> falta de recurso:
+        agendar_imediato(db, "transferir_recursos")
+        msg += " | sem recurso -> transferir_recursos IMEDIATO"
     return ok, msg
+
+
+def detectar_tribo(t):
+    """Lê o povo da conta na página de perfil (ex.: 'Tribo Romanos')."""
+    _, ph = t.ir(t.base + "/profile", 5)
+    txt = re.sub(r"<[^>]+>", " ", ph)
+    m = re.search(r"Tribo\s+([A-Za-zÀ-ú]+)", txt)
+    return m.group(1) if m else None
+
+
+def tribo_conta(t, db):
+    """Povo da conta, com cache no 'meta' (só consulta a 1ª vez)."""
+    v = meta_get(db, "tribo")
+    if not v:
+        v = detectar_tribo(t)
+        if v:
+            meta_set(db, "tribo", v)
+    return v
+
+
+def prob_esconderijo(db, html):
+    """Probabilidade (0..1) de mandar no esconderijo neste ciclo. Sobe conforme
+    a proteção de iniciante acaba ('na sorte'): p = 1 - restante/máximo, onde o
+    'máximo' é a maior proteção já vista (gravada no meta), então não precisa
+    saber o total exato do servidor. ~0 no começo, ~1 quando a proteção zera.
+    A proteção vem do texto 'ainda tem HH:MM:SS horas de proteção' (dorf1)."""
+    txt = re.sub(r"<[^>]+>", " ", html).replace("‭", "").replace("‬", "")
+    m = re.search(r"(\d+):(\d+):(\d+)\s*horas? de prote", txt)
+    if not m:
+        return 0.0
+    rem = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+    mx = meta_get(db, "protecao_max_seg")
+    mx = max(int(mx) if mx else 0, rem)
+    meta_set(db, "protecao_max_seg", mx)
+    return max(0.0, min(1.0, 1.0 - rem / mx)) if mx > 0 else 0.0
+
+
+def decidir_dorf2(t, db, cfg, html_dorf1):
+    """Decisão do dorf2: primeiro a RAMPA DO ESCONDERIJO ('na sorte', sobe com o
+    fim da proteção); se não sortear (ou já no alvo), escolhe evoluir × criar
+    novo. Para de mirar o esconderijo ao atingir CRANNY_NIVEL_ALVO (~2000)."""
+    cfg = cfg or {}
+    p = prob_esconderijo(db, html_dorf1)
+    nivel_alvo = int(cfg.get("CRANNY_NIVEL_ALVO", "10"))
+    if random.random() < p:
+        ok, msg = t.subir_ou_criar_esconderijo(nivel_alvo)
+        if ok:
+            return ok, "ESCONDERIJO(p=%.0f%%): %s" % (p * 100, msg)
+        ok2, msg2 = t.construir_ou_evoluir_dorf2(cfg)   # já no alvo/recusa -> normal
+        return ok2, "ESCONDERIJO(p=%.0f%%) n/d (%s) -> %s" % (p * 100, msg, msg2)
+    return t.construir_ou_evoluir_dorf2(cfg)
 
 
 def proximo_evento_seg(db, minimo=300, maximo=1800):
@@ -848,10 +1108,42 @@ def proximo_evento_seg(db, minimo=300, maximo=1800):
     return int(max(minimo, min(maximo, min(futuros) + 5)))
 
 
+# ---- PROXIMO_SCRIPT_IMEDIATO: slot de PRIORIDADE MÁXIMA (one-shot) ----
+# O executor tem 3 níveis de prioridade:
+#   1) imediato  -> roda JÁ no próximo ciclo, na frente de tudo (este slot)
+#   2) agendados -> quando o horário/evento chega (gates de tempo)
+#   3) loop      -> a cada ciclo
+# Qualquer script pode enfileirar o próximo com agendar_imediato(db, "nome").
+# O slot vive em meta['proximo_imediato'] e é consumido (limpo) ao rodar.
+def agendar_imediato(db, nome):
+    """Coloca um script no slot imediato (roda no início do próximo ciclo)."""
+    meta_set(db, "proximo_imediato", nome)
+
+
+def _exec_script(nome, t, db, cfg):
+    """Executa um script pelo nome (usado pelo slot imediato)."""
+    if nome == "transferir_recursos":
+        _, _, _, fez = t.transferir_recursos()
+        # marca se foi inútil (herói vazio) p/ evoluir_controlado não reagendar
+        meta_set(db, "transfer_vazio", "" if fez else _agora())
+        return "transfer ok" if fez else "nada a transferir (herói vazio)"
+    if nome in ("construir_dorf1", "dorf1"):
+        return evoluir_controlado(t, db, "dorf1", None, cfg)[1]
+    if nome in ("construir_dorf2", "dorf2"):
+        return evoluir_controlado(t, db, "dorf2", None, cfg)[1]
+    return "script desconhecido: %s" % nome
+
+
 def ciclo(t, db, cfg):
-    """Uma passada do executor. Lê o dorf1 UMA vez e só age no que está
-    pendente (indicadores) ou na hora certa (gates de horário no SQLite)."""
+    """Uma passada do executor. Roda primeiro o script IMEDIATO (se houver),
+    depois lê o dorf1 UMA vez e só age no que está pendente (indicadores) ou na
+    hora certa (gates de horário no SQLite)."""
     log = []
+    # --- PRIORIDADE 1: próximo script imediato (one-shot, na frente de tudo) ---
+    prox = meta_get(db, "proximo_imediato")
+    if prox:
+        meta_set(db, "proximo_imediato", "")          # consome o slot
+        log.append("IMEDIATO[%s]: %s" % (prox, _exec_script(prox, t, db, cfg)))
     _, html = t.ir(t.base + "/dorf1.php", 4)
 
     # --- OBRIGATÓRIOS (só agem se o indicador/condição manda) ---
@@ -875,12 +1167,17 @@ def ciclo(t, db, cfg):
         if okh:
             log.append("hero: %s" % msgh)
 
-    # --- RANDÔMICOS / gerais ---
-    _, _, _, fez = t.transferir_recursos()
-    if fez:
-        log.append("transfer ok")
-    oke, msge = evoluir_controlado(t, db, None)
-    log.append("evolve: %s" % msge)
+    # --- CONSTRUÇÃO (agendado). transferir_recursos NÃO roda aqui: só entra
+    # via PROXIMO_SCRIPT_IMEDIATO quando um build falha por falta de recurso.
+    # Romano tem 2 filas (1 campo dorf1 + 1 edifício dorf2): tenta os DOIS.
+    tribo = tribo_conta(t, db)
+    if tribo and tribo.lower().startswith("romano"):
+        for onde in ("dorf1", "dorf2"):
+            oke, msge = evoluir_controlado(t, db, onde, html, cfg)
+            log.append("evolve %s: %s" % (onde, msge))
+    else:
+        oke, msge = evoluir_controlado(t, db, None, html, cfg)
+        log.append("evolve: %s" % msge)
 
     # --- DIÁRIO: scan do mapa 1x/dia (gate no meta) ---
     ult = meta_get(db, "ultimo_scan_mapa")
@@ -899,6 +1196,13 @@ def ciclo(t, db, cfg):
                    (_agora(), mv["tipo"], mv["alvo"], mv["chegada"],
                     mv["segundos"], mv["detalhe"]))
     db.commit()
+
+    # --- assalto a oásis (agendado; aventura já rodou acima). Só roda se
+    # OASIS_ATIVO no .env -> evita navegar à página de envio sem tropa. ---
+    if str(cfg.get("OASIS_ATIVO", "false")).strip().lower() in (
+            "1", "true", "sim", "yes"):
+        oko, msgo = t.atacar_oasis(db, cfg)
+        log.append("oasis: %s" % msgo)
 
     resumo = "; ".join(log) if log else "nada pendente"
     log_acao(db, "ciclo", True, resumo)
@@ -947,18 +1251,6 @@ def snapshot_estado(db, est, missoes=None):
                (_agora(), e["madeira"], e["barro"], e["ferro"], e["cereal"],
                 c["madeira"], c["barro"], c["ferro"], c["cereal"], missoes))
     db.commit()
-
-
-def relatorio(t):
-    est = t.estado()
-    print("== RECURSOS ==")
-    print("  %-8s %8s %8s %8s" % ("recurso", "estoque", "capac.", "livre"))
-    for nm in RECURSOS:
-        print("  %-8s %8d %8d %8d" % (nm, est["estoque"][nm],
-                                      est["capacidade"][nm], est["livre"][nm]))
-    prontas = t.missoes_prontas()
-    print("== MISSÕES ==")
-    print("  prontas para recolher:", prontas, "(recolher com: collect)")
 
 
 def main():
@@ -1029,8 +1321,12 @@ def main():
             while True:
                 resumo = ciclo(t, db, cfg)
                 print("[%s] %s" % (_agora(), resumo))
-                seg = proximo_evento_seg(db)
-                print("  dormindo ~%d min até o próximo evento..." % (seg // 60))
+                if meta_get(db, "proximo_imediato"):
+                    seg = 60   # há script imediato pendente -> acorda logo
+                    print("  script imediato na fila -> dormindo ~1 min...")
+                else:
+                    seg = proximo_evento_seg(db)
+                    print("  dormindo ~%d min até o próximo evento..." % (seg // 60))
                 time.sleep(seg)
         except KeyboardInterrupt:
             print("\nloop parado.")
@@ -1047,6 +1343,9 @@ def main():
                                                   mv["chegada"]))
         db.commit()
         ok, detalhe = (len(movs) > 0), "movimentos=%d" % len(movs)
+    elif cmd == "oasis":
+        ok, detalhe = t.atacar_oasis(db, cfg)
+        print("oásis:", "ENVIADO" if ok else "não enviou", "->", detalhe)
     elif cmd == "scan":
         forcar = len(sys.argv) >= 3 and sys.argv[2] == "force"
         ultimo = meta_get(db, "ultimo_scan_mapa")
