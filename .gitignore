@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Perfil vivo do browser (cookies/cache de sessão — NÃO versionar)
+profile/
+
+# Backup do perfil (contém a sessão de login)
+*.tar.gz
+
+# Credenciais e banco de runtime por conta
+.env
+*.sqlite
+*.sqlite-journal
