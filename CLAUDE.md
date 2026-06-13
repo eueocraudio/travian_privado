@@ -178,12 +178,15 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
 ./iniciar.sh --porta 9000 parar          # kill the browser on that port
 
 # Pick account + port on the command line (one browser/profile per account):
-./iniciar.sh --server <host> --account <user> [--porta N] [ciclo|loop]
+./iniciar.sh --server <host> --account <user> [--porta N] [--headless] [ciclo|loop|abrir]
+# --headless/--oculto runs the browser without a window (QT_QPA_PLATFORM=offscreen);
+# default is VISIBLE. `abrir` = browser + login → dorf1, then stop (no loop).
 
-# Interactive: asks server + account by keyboard, picks a free port 9001..10000,
-# then delegates to iniciar.sh. Run one terminal per account to go parallel.
-./interativo.sh              # ask + loop
+# Interactive: asks server + account (and visible/headless), picks a free port
+# 9001..10000, then delegates to iniciar.sh. Run one terminal per account.
+./interativo.sh              # ask + loop  (asks "Browser visível? [S/n]")
 ./interativo.sh ciclo        # ask + one pass
+./interativo.sh --headless   # skip the visibility question (run hidden)
 # Non-interactive: play EVERY account in parallel (one browser/port each). In
 # loop mode it stays a supervisor: every ALL_INTERVALO s (default 30) it rescans
 # accounts and launches a browser for any new (or crashed) account. Ctrl+C stops

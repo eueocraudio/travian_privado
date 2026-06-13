@@ -15,6 +15,9 @@
 #   ./interativo.sh ciclo     # pergunta server+conta e roda só uma passada
 #   ./interativo.sh all       # delega ao jogar.sh (todas as contas em paralelo)
 #
+# Pergunta também se o browser deve ser VISÍVEL (default) ou oculto; passe
+# --headless (oculto) ou --visivel por argumento para não perguntar.
+#
 set -u
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,15 +25,24 @@ RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DADOS="${TRAVIAN_DADOS:-$HOME/travian}"
 ACC="$DADOS/account"
 
-# Argumentos (ordem livre): "all" delega ao jogar.sh; loop|ciclo é o comando.
-MODO="single"; COMANDO="loop"
+# Argumentos (ordem livre): "all" delega ao jogar.sh; loop|ciclo é o comando;
+# --headless/--visivel define a visibilidade do browser sem perguntar.
+MODO="single"; COMANDO="loop"; HEADLESS=""
 for a in "$@"; do
   case "$a" in
-    all)        MODO="all" ;;
-    loop|ciclo) COMANDO="$a" ;;
-    *) echo "argumento desconhecido: $a (use: all | loop | ciclo)" >&2; exit 2 ;;
+    all)                 MODO="all" ;;
+    loop|ciclo)          COMANDO="$a" ;;
+    --headless|--oculto) HEADLESS="--headless" ;;
+    --visivel)           HEADLESS="--visivel" ;;
+    *) echo "argumento desconhecido: $a (use: all | loop | ciclo | --headless)" >&2; exit 2 ;;
   esac
 done
+
+# Pergunta a visibilidade do browser (default VISÍVEL) se não veio por argumento.
+if [ -z "$HEADLESS" ]; then
+  printf 'Browser visível? [S/n]: ' >&2; read -r _v
+  case "$_v" in [nN]*) HEADLESS="--headless" ;; *) HEADLESS="--visivel" ;; esac
+fi
 
 # Próxima porta livre acima da última atribuída (no fluxo single, basta a 1ª).
 ULTIMA_PORTA=9000
@@ -73,7 +85,7 @@ escolher() {
 
 # --- all: delega ao script não-interativo jogar.sh ---
 if [ "$MODO" = "all" ]; then
-  exec "$RAIZ/jogar.sh" "$COMANDO"
+  exec "$RAIZ/jogar.sh" "$HEADLESS" "$COMANDO"
 fi
 
 # --- fluxo single: pergunta server (com opção (all)) e conta ---
@@ -82,7 +94,7 @@ mapfile -t SERVERS < <(listar_dirs "$ACC")
 SERVER="$(escolher "server" "${SERVERS[@]}" "(all)")"
 [ -n "${SERVER:-}" ] || { echo "server vazio." >&2; exit 1; }
 if [ "$SERVER" = "(all)" ]; then
-  exec "$RAIZ/jogar.sh" "$COMANDO"
+  exec "$RAIZ/jogar.sh" "$HEADLESS" "$COMANDO"
 fi
 
 CONTAS=()
@@ -92,4 +104,4 @@ ACCOUNT="$(escolher "conta" "${CONTAS[@]}")"
 
 PORTA="$(proxima_porta)" || { echo "sem porta livre em 9001..10000." >&2; exit 1; }
 echo "==> $SERVER / $ACCOUNT  (porta $PORTA, comando $COMANDO)"
-exec "$RAIZ/iniciar.sh" --server "$SERVER" --account "$ACCOUNT" --porta "$PORTA" "$COMANDO"
+exec "$RAIZ/iniciar.sh" --server "$SERVER" --account "$ACCOUNT" --porta "$PORTA" "$HEADLESS" "$COMANDO"

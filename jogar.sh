@@ -18,11 +18,13 @@ RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DADOS="${TRAVIAN_DADOS:-$HOME/travian}"
 ACC="$DADOS/account"
 
-COMANDO="loop"
+COMANDO="loop"; HEADLESS=""
 for a in "$@"; do
   case "$a" in
-    loop|ciclo) COMANDO="$a" ;;
-    *) echo "argumento desconhecido: $a (use: loop | ciclo)" >&2; exit 2 ;;
+    loop|ciclo)                    COMANDO="$a" ;;
+    --headless|--oculto|--visivel) HEADLESS="$a" ;;
+    "") ;;                                       # ignora flag vazia repassada
+    *) echo "argumento desconhecido: $a (use: loop | ciclo | --headless)" >&2; exit 2 ;;
   esac
 done
 
@@ -76,7 +78,7 @@ _subir_conta() {
   log="$DADOS/logs/${srv}__${usr}.log"
   echo "  + subindo $conta  porta $porta  (log: $log)"
   "$RAIZ/iniciar.sh" --server "$srv" --account "$usr" --porta "$porta" \
-      "$COMANDO" >>"$log" 2>&1 &
+      $HEADLESS "$COMANDO" >>"$log" 2>&1 &
   ALL_PID[$conta]="$!"; ALL_PORTA[$conta]="$porta"
   sleep 2   # respiro entre browsers (cada um é pesado)
 }

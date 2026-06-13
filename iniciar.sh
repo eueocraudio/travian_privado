@@ -12,8 +12,11 @@
 #
 # Uso:
 #   ./iniciar.sh                                       # conta default, porta 9000, loop
-#   ./iniciar.sh --server <host> --account <user> [--porta N] [ciclo|loop]
+#   ./iniciar.sh --server <host> --account <user> [--porta N] [--headless] [ciclo|loop|abrir]
 #   ./iniciar.sh [--porta N] parar                     # encerra o browser daquela porta
+#
+# --headless (ou --oculto) sobe o browser SEM janela (QT_QPA_PLATFORM=offscreen);
+# o default é VISÍVEL.
 #
 # Sem --server/--account usa a conta default e o perfil plano (profile/),
 # preservando a sessão já logada. Com server/account cada conta ganha um perfil
@@ -38,12 +41,14 @@ export DISPLAY="${DISPLAY:-:0}"
 LIBXCB="${LIBXCB_DIR:-$HOME/.cache/unuser/lib}"
 
 # --- parâmetros por linha de comando -------------------------------------
-SERVER=""; ACCOUNT=""; PORTA_CLI=""; COMANDO=""
+SERVER=""; ACCOUNT=""; PORTA_CLI=""; COMANDO=""; HEADLESS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --server)  SERVER="${2:-}";  shift 2 ;;
     --account) ACCOUNT="${2:-}"; shift 2 ;;
     --porta)   PORTA_CLI="${2:-}"; shift 2 ;;
+    --headless|--oculto) HEADLESS=1; shift ;;   # browser não visível (default: visível)
+    --visivel) HEADLESS=0; shift ;;
     parar|ciclo|loop|abrir) COMANDO="$1"; shift ;;
     *) echo "ERRO: argumento desconhecido: $1" >&2; exit 2 ;;
   esac
@@ -135,9 +140,13 @@ subir_browser() {
     echo "==> browser já está no ar na porta $PORTA"
     return 0
   fi
-  echo "==> iniciando browser servidor (DISPLAY=$DISPLAY, perfil $PROFILE)"
+  local qt="" modo="visível (DISPLAY=$DISPLAY)"
+  if [ "$HEADLESS" = "1" ]; then
+    qt="QT_QPA_PLATFORM=offscreen"; modo="oculto (headless)"
+  fi
+  echo "==> iniciando browser servidor [$modo], perfil $PROFILE"
   mkdir -p "$PROFILE"
-  ( cd "$REPO" && LD_LIBRARY_PATH="$(ld_browser)" \
+  ( cd "$REPO" && LD_LIBRARY_PATH="$(ld_browser)" $qt \
       nohup "$PY" browser.py --servir "$PORTA" -d "$PROFILE" \
       >/tmp/travian_browser.log 2>&1 & )
   for _ in $(seq 1 40); do
