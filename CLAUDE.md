@@ -36,7 +36,9 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
     like `HEROI_ATRIBUTO` (forca|ataque|defesa|producao), `ESTRATEGIA` and
     `OASIS_*`. The checked-in **`.env.template`** is the canonical key list; at
     startup `conferir_env_template()` warns (doesn't abort) about keys the
-    account `.env` is missing relative to it.
+    account `.env` is missing relative to it. New accounts are created with
+    **`./cadastrar.sh`** (asks server/email/password, fills the `.env` from the
+    template; other keys keep their defaults).
   - `travian.sqlite` — history/state (see tables below).
   - `profile/` — the live browser profile for this account.
   - `travian.tar.gz` — saved-profile backup (login session) for this account.
