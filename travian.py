@@ -51,6 +51,7 @@ import sqlite3
 import sys
 import textwrap
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from glob import glob
 
@@ -234,6 +235,22 @@ class Travian:
             {"type": "sleep", "value": 10},
         ])
         return self.url_atual()
+
+    def logout(self):
+        """Encerra a sessão do jogo (item II: antes de uma soneca longa). Lê o
+        link de logout.php REAL (com token) do dorf1 e navega para ele; sem o
+        link, cai no /logout.php direto. O auto-relogin do ir() reloga depois."""
+        self.comentar("logout (soneca longa)")
+        _, html = self.ir(self.base + "/dorf1.php", 3, _relogin=False)
+        m = re.search(r'href="([^"]*logout\.php[^"]*)"', html or "")
+        url = m.group(1) if m else "/logout.php"
+        url = url.replace("&amp;", "&")
+        if url.startswith("/"):
+            url = self.base + url
+        elif not url.startswith("http"):
+            url = self.base + "/" + url
+        self.enviar([{"type": "navigate", "value": url},
+                     {"type": "sleep", "value": 3}])
 
     # ---- leitura de estado --------------------------------------------
     def estado(self):
@@ -1293,12 +1310,111 @@ def prob_esconderijo(db, html):
     return max(0.0, min(1.0, 1.0 - rem / mx)) if mx > 0 else 0.0
 
 
+# --- ESTRUTURAS obrigatórias (item I): nome -> gid oficial do Travian.
+# gids confirmados na árvore de edifícios do Travian; aceita aliases por
+# idioma/acento (normalizados por _norm). Muro/Muralha usam o gid da tribo.
+GID_POR_NOME = {
+    "armazem": 10, "warehouse": 10,
+    "celeiro": 11, "silo": 11, "granary": 11,
+    "ferraria": 13, "armaria": 13, "armoury": 13, "blacksmith": 12,
+    "praca de torneios": 14, "tournament square": 14,
+    "edificio principal": 15, "predio principal": 15, "main building": 15,
+    "ponto de encontro": 16, "ponto de reuniao": 16,
+    "ponto de reuniao militar": 16, "praca de reuniao": 16, "rally point": 16,
+    "mercado": 17, "marketplace": 17,
+    "embaixada": 18, "embassy": 18,
+    "quartel": 19, "barracks": 19,
+    "estabulo": 20, "cavalarica": 20, "stable": 20,
+    "oficina": 21, "manufatura de equipamento": 21, "workshop": 21,
+    "academia": 22, "academy": 22,
+    "esconderijo": 23, "cranny": 23,
+    "prefeitura": 24, "town hall": 24, "townhall": 24,
+    "residencia": 25, "residence": 25,
+    "palacio": 26, "palace": 26,
+    "tesouro": 27, "camara do tesouro": 27, "treasury": 27,
+    "escritorio comercial": 28, "posto de comercio": 28, "trade office": 28,
+    "mansao do heroi": 37, "hero's mansion": 37, "heros mansion": 37,
+}
+MUROS_NOME = {"muro", "muralha", "palicada", "muralha de terra",
+              "muralha de pedra", "muralha de estacas", "muralha improvisada",
+              "city wall", "earth wall", "palisade", "stone wall", "wall"}
+GIDS_MURO = (31, 32, 33, 42, 43)
+# Valor padrão (nomes oficiais já corrigidos a partir da árvore do Travian).
+ESTRUTURAS_PADRAO = ("Armazém(5);Embaixada(1);Ponto de Encontro(5);"
+                     "Celeiro(5);Esconderijo(10);Muralha(3)")
+
+
+def _norm(s):
+    """Normaliza nome: sem acento, minúsculo, espaços colapsados."""
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", s.strip().lower())
+
+
+def parse_estruturas(cfg, tribo=None):
+    """Lê ESTRUTURAS='Nome(nivel);...' do .env -> [(gid, nome, alvo)] (item I).
+    Nomes são tolerantes a acento/idioma; 'Muro/Muralha' resolvem pelo gid da
+    tribo. Itens não reconhecidos são ignorados."""
+    cfg = cfg or {}
+    bruto = cfg.get("ESTRUTURAS") or ESTRUTURAS_PADRAO
+    out = []
+    for item in re.split(r"[;\n]+", bruto):
+        m = re.match(r"\s*(.+?)\s*\(\s*(\d+)\s*\)\s*$", item)
+        if not m:
+            continue
+        nome, alvo = m.group(1).strip(), int(m.group(2))
+        chave = _norm(nome)
+        gid = gid_muro(tribo, cfg) if chave in MUROS_NOME else GID_POR_NOME.get(chave)
+        if gid:
+            out.append((gid, nome, alvo))
+    return out
+
+
+def evoluir_estruturas(t, db, cfg, html_dorf2=None):
+    """Item I: evolui as ESTRUTURAS obrigatórias de forma UNIFORME — escolhe a
+    que está MAIS LONGE do alvo (maior déficit alvo-nível) e sobe/constrói 1
+    nível dela. Devolve (ok, msg); (False, motivo) se nada a fazer."""
+    estruturas = parse_estruturas(cfg, tribo_conta(t, db))
+    if not estruturas:
+        return False, "sem ESTRUTURAS"
+    if html_dorf2 is None:
+        _, html_dorf2 = t.ir(t.base + "/dorf2.php", 4)
+    edis = t.edificios_dorf2(html_dorf2)
+    nivel = {}
+    for e in edis:
+        nivel[e["gid"]] = max(nivel.get(e["gid"], 0), e["nivel"])
+    cand = [(alvo - nivel.get(gid, 0), gid, nome, alvo, nivel.get(gid, 0))
+            for gid, nome, alvo in estruturas if alvo - nivel.get(gid, 0) > 0]
+    if not cand:
+        return False, "todas no alvo"
+    maxd = max(c[0] for c in cand)                       # mais longe do objetivo
+    _, gid, nome, alvo, atual = random.choice([c for c in cand if c[0] == maxd])
+    # Ponto de Encontro (39) e Muro (40) têm slot fixo e já existem na aldeia.
+    slot_fixo = 40 if gid in GIDS_MURO else (39 if gid == 16 else None)
+    if slot_fixo is not None:
+        ok = t._subir_verde(slot_fixo, gid)
+        return ok, "%s slot %d %d->%d (%s)" % (nome, slot_fixo, atual, atual + 1,
+                                               "construindo" if ok else "recusado")
+    existe = [e for e in edis if e["gid"] == gid]
+    if existe:
+        slot = min(existe, key=lambda e: e["nivel"])["slot"]
+        ok = t._subir_verde(slot, gid)
+        return ok, "%s %d->%d (%s)" % (nome, atual, atual + 1,
+                                       "construindo" if ok else "recusado")
+    slot = t._primeiro_slot_vazio(html_dorf2)
+    if slot is None:
+        return False, "%s: sem slot vazio" % nome
+    ok = t.construir(slot, gid)
+    return ok, "%s criar slot %d (%s)" % (nome, slot,
+                                          "construindo" if ok else "recusado")
+
+
 def decidir_dorf2(t, db, cfg, html_dorf1):
     """Decisão do dorf2, por prioridade:
-    1) X: MURO até MURO_NIVEL_ALVO (5) ENQUANTO há proteção de iniciante;
+    1) X: MURO até MURO_NIVEL_ALVO ENQUANTO há proteção de iniciante (prazo);
     2) XVI: no modo AGRESSIVO, garante o QUARTEL (gid 19) se ainda falta;
-    3) RAMPA DO ESCONDERIJO ('na sorte', sobe com o fim da proteção);
-    4) evoluir × criar novo (base normal)."""
+    3) I: ESTRUTURAS obrigatórias — evolui a mais atrasada (uniforme);
+    4) fallback: evoluir o de menor nível × criar novo (base normal)."""
     cfg = cfg or {}
     # 1) MURO durante a proteção (só local específico: slot 40).
     prot = protecao_restante_seg(html_dorf1)
@@ -1314,14 +1430,11 @@ def decidir_dorf2(t, db, cfg, html_dorf1):
         okq, msgq = t.criar_novo_dorf2([19])         # 19 = Quartel
         if okq:
             return okq, "QUARTEL: " + msgq
-    p = prob_esconderijo(db, html_dorf1)
-    nivel_alvo = int(cfg.get("CRANNY_NIVEL_ALVO", "10"))
-    if random.random() < p:
-        ok, msg = t.subir_ou_criar_esconderijo(nivel_alvo)
-        if ok:
-            return ok, "ESCONDERIJO(p=%.0f%%): %s" % (p * 100, msg)
-        ok2, msg2 = t.construir_ou_evoluir_dorf2(cfg)   # já no alvo/recusa -> normal
-        return ok2, "ESCONDERIJO(p=%.0f%%) n/d (%s) -> %s" % (p * 100, msg, msg2)
+    # 3) ESTRUTURAS obrigatórias: evolui a mais longe do alvo (item I).
+    oke, msge = evoluir_estruturas(t, db, cfg)
+    if oke:
+        return oke, "ESTRUTURA " + msge
+    # 4) nada obrigatório pendente -> base normal.
     return t.construir_ou_evoluir_dorf2(cfg)
 
 
@@ -1849,6 +1962,9 @@ def main():
                 volta = (datetime.now(timezone.utc).astimezone()
                          + timedelta(seconds=seg)).strftime("%H:%M")
                 t.comentar("dormindo ~%d min (volto %s)" % (seg // 60, volta))
+                # II: soneca > 1h -> faz logout (o auto-relogin volta sozinho).
+                if seg > 3600:
+                    t.logout()
                 t.enviar([{"type": "navigate", "value": "https://www.google.com"},
                           {"type": "sleep", "value": 1}])
                 time.sleep(seg)

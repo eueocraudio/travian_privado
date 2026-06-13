@@ -103,15 +103,21 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
   there are no troops; once an army is detected the bot starts raiding oases via
   `atacar_oasis()`. Adventure always runs before oásis in the cycle (see the
   *aventura-antes-oasis* memory).
-- **Esconderijo (cranny)** is built/upgraded inside dorf2 with a probability
-  gate (`prob_esconderijo()` at `travian.py:1064`) — see the *esconderijo-design*
-  memory.
-- **Muro (wall).** `decidir_dorf2()` prioritizes the wall over everything else
-  while beginner protection is still running, until `MURO_NIVEL_ALVO` (5). The
-  wall lives only in the fixed dorf2 slot **40** (`subir_muro()`); its gid is
-  tribe-specific (`gid_muro()`: roman 31 / teuton 32 / gaul 33 / egyptian 42 /
-  hun 43, override via `MURO_GID`). Protection time left is read from dorf1 by
-  `protecao_restante_seg()`.
+- **`decidir_dorf2()` priority.** 1) the **wall** while beginner protection is
+  still running, until `MURO_NIVEL_ALVO` (`subir_muro()`, fixed slot **40**, gid
+  by tribe via `gid_muro()`: roman 31 / teuton 32 / gaul 33 / egyptian 42 / hun
+  43, override `MURO_GID`; protection time from `protecao_restante_seg()`); 2) in
+  `agressivo`, ensure a Barracks (gid 19); 3) the **required structures**; 4) the
+  base evolve/create-new fallback.
+- **Required structures (`ESTRUTURAS` in `.env`).** A `Nome(nível);...` list
+  (e.g. `Armazém(5);Embaixada(1);Ponto de Encontro(5);Celeiro(5);Esconderijo(10);
+  Muralha(3)`). `evoluir_estruturas()` evolves them **uniformly**: each step it
+  picks the one **furthest from its target** (largest target−level deficit) and
+  upgrades/builds one level. Names map to official Travian gids via
+  `GID_POR_NOME` (accent/locale-tolerant `_norm`); Muro/Muralha resolves the
+  wall gid by tribe. Rally Point (slot 39) and Wall (slot 40) are fixed slots.
+  `ESTRUTURAS_PADRAO` is the default — this replaced the old probabilistic
+  cranny ramp.
 - **Attack strategy (`ESTRATEGIA` in `.env`).** `montar_estrategia()` runs once
   at startup (`main`), reading the `relatorios` table, and stores the result in
   `cfg["_estrategia"]` (used by `oasis_habilitado`/`atacar_oasis`): `sem_perdas`
@@ -143,7 +149,9 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
   outside `base`, so it never triggers.
 - **Cycle hygiene knobs (recent).** `ir()` skips the reload when already on the
   target URL (re-reads HTML only) unless `recarregar=True`; the `loop` navigates
-  to `google.com` while sleeping (stays off the game between cycles); reports are
+  to `google.com` while sleeping (stays off the game between cycles), and if the
+  nap is **longer than 1h** it calls `logout()` first (reads the real
+  `logout.php` link with token from dorf1; auto-relogin brings it back); reports are
   only opened when the unread indicator > 0 **and** the `rid` isn't already in
   the `relatorios` table; oásis enablement first tries to detect an army from the
   dorf1 HTML (`exercito_no_dorf1()`) before falling back to the send page; every
