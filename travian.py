@@ -49,6 +49,7 @@ import re
 import socket
 import sqlite3
 import sys
+import textwrap
 import time
 from datetime import datetime, timedelta, timezone
 from glob import glob
@@ -1455,15 +1456,44 @@ def _exec_script(nome, t, db, cfg):
     return "script desconhecido: %s" % nome
 
 
+def _fmt_num(n):
+    """Número com separador de milhar pt-BR (1234 -> '1.234')."""
+    try:
+        return "{:,}".format(int(n)).replace(",", ".")
+    except (ValueError, TypeError):
+        return str(n)
+
+
+def _caixa(titulo, linhas, larg=58):
+    """Desenha uma caixa box-drawing de largura interna 'larg'. Cada item de
+    'linhas' é uma str (conteúdo, truncada a 'larg') ou None (régua horizontal)."""
+    titulo = str(titulo)[:larg]
+    topo = "┌─ %s %s┐" % (titulo, "─" * max(0, larg - len(titulo) - 1))
+    out = [topo]
+    for l in linhas:
+        if l is None:
+            out.append("├" + "─" * (larg + 2) + "┤")
+        else:
+            out.append("│ %s │" % str(l)[:larg].ljust(larg))
+    out.append("└" + "─" * (larg + 2) + "┘")
+    return "\n".join(out)
+
+
 def resumo_geral(t, db, html, acoes):
-    """Resumo legível ao FIM de cada ciclo (V): recursos do dorf1, obras em
-    andamento, próximo evento e o que o ciclo fez."""
-    linhas = ["== resumo %s ==" % rotulo_conta()]
+    """Resumo bonito (tabela em caixa) ao FIM de cada ciclo (V): recursos,
+    obras em andamento, exército, próximo evento e o que o ciclo fez."""
+    W = 58
+    linhas = []
     try:
         est = t.parse_estado(html)
         e, c = est["estoque"], est["capacidade"]
-        linhas.append("recursos: " + "  ".join(
-            "%s %s/%s" % (nm[:3], e[nm], c[nm]) for nm in RECURSOS))
+        linhas.append("%-8s %10s %10s %5s" % ("recurso", "estoque", "capac.", "uso"))
+        for nm in RECURSOS:
+            cap = c.get(nm) or 0
+            pct = (e[nm] * 100 // cap) if cap else 0
+            linhas.append("%-8s %10s %10s %4d%%" % (
+                nm, _fmt_num(e[nm]), _fmt_num(cap), pct))
+        linhas.append(None)
     except Exception:
         pass
     agora = datetime.now(timezone.utc).astimezone()
@@ -1473,16 +1503,21 @@ def resumo_geral(t, db, html, acoes):
         try:
             dt = datetime.fromisoformat(fim)
             if dt > agora:
-                obras.append("dorf%s termina %s" % (dorf, dt.strftime("%H:%M")))
+                obras.append("dorf%s→%s" % (dorf, dt.strftime("%H:%M")))
         except Exception:
             pass
-    linhas.append("obras: " + ("; ".join(obras) if obras else "fila livre"))
-    ex = "sim" if meta_get(db, "tem_exercito") == "1" else "não/desconhecido"
-    linhas.append("exército: " + ex)
+    linhas.append("obras    : " + (", ".join(obras) if obras else "fila livre"))
+    linhas.append("exército : " + ("sim" if meta_get(db, "tem_exercito") == "1"
+                                    else "não/desconhecido"))
     seg = proximo_evento_seg(db)
-    linhas.append("próximo evento em ~%d min" % (seg // 60))
-    linhas.append("ações: " + acoes)
-    return "\n".join(linhas)
+    volta = (agora + timedelta(seconds=seg)).strftime("%H:%M")
+    linhas.append("próximo  : ~%d min (volta %s)" % (seg // 60, volta))
+    prefixo = "ações    : "
+    env = textwrap.wrap(acoes, max(10, W - len(prefixo))) or [""]
+    linhas.append(prefixo + env[0])
+    for cont in env[1:]:
+        linhas.append(" " * len(prefixo) + cont)
+    return "\n" + _caixa(rotulo_conta(), linhas, W)
 
 
 def ciclo(t, db, cfg):
