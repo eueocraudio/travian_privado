@@ -33,13 +33,17 @@ ULTIMA_PORTA=9000                      # contador de portas (9001..10000)
 declare -A ALL_PORTA=()                # conta -> porta
 declare -A ALL_PID=()                  # conta -> pid do iniciar.sh
 
-# Próxima porta livre acima da última atribuída (evita corrida: o browser leva
-# alguns segundos para ocupar a porta, então não confiamos só no 'ss').
+# Próxima porta livre acima da última atribuída -> resultado na GLOBAL PORTA_RES
+# (NÃO usa echo/$(): command substitution roda em subshell e perderia o
+# incremento de ULTIMA_PORTA, fazendo todas as contas pegarem a mesma porta).
+# O contador garante portas distintas mesmo antes de o browser ocupar a porta
+# (o 'ss' só pula portas já no ar de execuções anteriores).
+PORTA_RES=""
 proxima_porta() {
   local p
   for p in $(seq $((ULTIMA_PORTA + 1)) 10000); do
     ss -ltn 2>/dev/null | grep -qE "127\.0\.0\.1:$p\b" && continue
-    ULTIMA_PORTA="$p"; echo "$p"; return 0
+    ULTIMA_PORTA="$p"; PORTA_RES="$p"; return 0
   done
   return 1
 }
@@ -74,7 +78,8 @@ _limpar_all() {
 _subir_conta() {
   local conta="$1" srv usr porta log
   srv="${conta%%/*}"; usr="${conta#*/}"
-  porta="$(proxima_porta)" || { echo "  sem porta livre p/ $conta" >&2; return 1; }
+  proxima_porta || { echo "  sem porta livre p/ $conta" >&2; return 1; }
+  porta="$PORTA_RES"
   log="$DADOS/logs/${srv}__${usr}.log"
   echo "  + subindo $conta  porta $porta  (log: $log)"
   "$RAIZ/iniciar.sh" --server "$srv" --account "$usr" --porta "$porta" \
