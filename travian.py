@@ -24,7 +24,8 @@ Multi-server / multi-user. Cada conta vive em:
     account/<servidor>/<usuario>/
         .env            -> TRAVIAN_BASE/EMAIL/PASSWORD + config (HEROI_ATRIBUTO,
                            DORF2_PCT_NOVO, DORF2_NOVOS, CRANNY_NIVEL_ALVO,
-                           OASIS_ATIVO, OASIS_HEROI_OBRIGATORIO)
+                           OASIS_AUTO/OASIS_CHECK_H, OASIS_ATIVO,
+                           OASIS_HEROI_OBRIGATORIO)
         travian.sqlite  -> histórico (acoes, estado, construcoes, oasis, ...)
 A conta é escolhida por TRAVIAN_ACCOUNT="<servidor>/<usuario>"; se houver só
 uma conta, é usada automaticamente. Todo comando é registrado no SQLite.
@@ -1088,6 +1089,38 @@ def decidir_dorf2(t, db, cfg, html_dorf1):
     return t.construir_ou_evoluir_dorf2(cfg)
 
 
+def oasis_habilitado(t, db, cfg):
+    """Decide se o assalto a oásis roda neste ciclo. Liga SOZINHO quando há
+    exército: enquanto não há, checa a página de envio só 1x a cada OASIS_CHECK_H
+    horas (barato); ao detectar tropa de exército grava meta['tem_exercito']=1 e
+    passa a rodar todo ciclo. OASIS_ATIVO força on; OASIS_AUTO=false desliga o
+    automático."""
+    cfg = cfg or {}
+    sim = ("1", "true", "sim", "yes")
+    if str(cfg.get("OASIS_ATIVO", "false")).strip().lower() in sim:
+        return True
+    if str(cfg.get("OASIS_AUTO", "true")).strip().lower() not in sim:
+        return False
+    if meta_get(db, "tem_exercito") == "1":
+        return True
+    ult = meta_get(db, "ultima_checagem_exercito")
+    horas = None
+    if ult:
+        try:
+            dt = datetime.fromisoformat(ult)
+            horas = (datetime.now(dt.tzinfo) - dt).total_seconds() / 3600
+        except Exception:
+            horas = None
+    if horas is not None and horas < float(cfg.get("OASIS_CHECK_H", "6")):
+        return False
+    meta_set(db, "ultima_checagem_exercito", _agora())
+    disp, _ = t.tropas_disponiveis_ataque()      # 1 leitura da página de envio
+    if any(tn != "t11" for tn in disp):
+        meta_set(db, "tem_exercito", "1")
+        return True
+    return False
+
+
 def proximo_evento_seg(db, minimo=300, maximo=1800):
     """Segundos até o próximo horário relevante (fim de obra / chegada de
     tropa) no SQLite, limitado a [minimo, maximo] — para o loop dormir até o
@@ -1197,11 +1230,13 @@ def ciclo(t, db, cfg):
                     mv["segundos"], mv["detalhe"]))
     db.commit()
 
-    # --- assalto a oásis (agendado; aventura já rodou acima). Só roda se
-    # OASIS_ATIVO no .env -> evita navegar à página de envio sem tropa. ---
-    if str(cfg.get("OASIS_ATIVO", "false")).strip().lower() in (
-            "1", "true", "sim", "yes"):
+    # --- assalto a oásis (agendado; aventura já rodou acima). Liga sozinho ao
+    # detectar exército (oasis_habilitado: cache meta['tem_exercito'], checagem
+    # 1x/OASIS_CHECK_H h enquanto não há tropa). ---
+    if oasis_habilitado(t, db, cfg):
         oko, msgo = t.atacar_oasis(db, cfg)
+        if "sem tropa" in msgo:        # exército acabou -> volta a checar depois
+            meta_set(db, "tem_exercito", "")
         log.append("oasis: %s" % msgo)
 
     resumo = "; ".join(log) if log else "nada pendente"
