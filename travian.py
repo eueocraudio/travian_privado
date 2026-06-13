@@ -1912,6 +1912,19 @@ def _recarregar_modulo():
         return None
 
 
+def imprimir_scripts():
+    """Mostra na tela os nomes de TODOS os scripts (tarefas) do registro,
+    agrupados por tipo (agendado/loop)."""
+    linhas = []
+    for tipo in ("agendado", "loop"):
+        nomes = [n for n, m in SCRIPTS.items() if m.get("tipo") == tipo]
+        linhas.append("[%s]  (%d)" % (tipo, len(nomes)))
+        for n in nomes:
+            flag = "" if SCRIPTS[n].get("feito") else "   (planejado)"
+            linhas.append("   • %s%s" % (n, flag))
+    print(_caixa("scripts do bot (%d)" % len(SCRIPTS), linhas))
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     conta_dir, base, email, senha, cfg = resolver_conta()
@@ -1925,6 +1938,7 @@ def main():
     print("== estratégia: %s (%d relatórios analisados, %d coords a evitar) =="
           % (cfg["_estrategia"]["modo"], cfg["_estrategia"]["analisados"],
              len(cfg["_estrategia"]["evitar"])))
+    imprimir_scripts()                          # nomes de todos os scripts na tela
 
     if cmd == "status":
         est = t.estado()
