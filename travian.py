@@ -313,20 +313,28 @@ class Travian:
                       html, re.S)
         return int(m.group(1)) if m else 0
 
-    def heroi_em_aventura(self, html=None):
-        """True se o herói já está a caminho de uma aventura. Regra: no dorf1,
-        a seção 'tropas saindo' mostra 'Aventura' quando o herói está fora."""
+    def heroi_em_casa(self, html=None):
+        """True se o herói está EM CASA (disponível). No dorf1, o ícone do herói
+        tem a classe `heroHome` quando está na aldeia; quando está fora (aventura,
+        voltando, morto, revivendo) a classe é outra. Mais confiável que o texto
+        'tropas saindo Aventura' (não depende de idioma)."""
         if html is None:
             _, html = self.ir(self.base + "/dorf1.php", 4)
-        txt = re.sub(r"<[^>]+>", " ", html)
-        return bool(re.search(r"tropas saindo.{0,80}?Aventura", txt, re.S | re.I))
+        return bool(re.search(r'class="[^"]*\bheroHome\b', html or ""))
+
+    def heroi_em_aventura(self, html=None):
+        """True se o herói NÃO está disponível em casa (a caminho de aventura,
+        voltando, etc.). Implementado como 'não está heroHome' (ver
+        heroi_em_casa)."""
+        if html is None:
+            _, html = self.ir(self.base + "/dorf1.php", 4)
+        return not self.heroi_em_casa(html)
 
     def fazer_aventura(self, vida_minima=50):
-        """Envia o herói à 1ª aventura se: ele NÃO está já em aventura (dorf1
-        'tropas saindo' não mostra 'Aventura'), há aventura disponível (>0) e a
-        vida está boa (> vida_minima)."""
-        if self.heroi_em_aventura():
-            return False, "herói já está a caminho de uma aventura"
+        """Envia o herói à 1ª aventura se: ele está EM CASA (heroHome no dorf1),
+        há aventura disponível (>0) e a vida está boa (> vida_minima)."""
+        if not self.heroi_em_casa():
+            return False, "herói não está em casa (heroHome ausente)"
         n = self.num_aventuras()
         if n <= 0:
             return False, "sem aventuras disponíveis"
@@ -420,54 +428,84 @@ class Travian:
         """Sobe um campo de recurso (dorf1)."""
         return self._subir_verde(slot, gid), None
 
+    # Estados de slot (na classe do <a>/campo): 'good' = dá pra evoluir AGORA;
+    # 'notNow' = falta recurso; 'maxLevel' = no máximo; 'underConstruction' = fila.
+    ESTADOS_SLOT = ("good", "notNow", "maxLevel", "underConstruction")
+
+    def _estado_por_slot(self, html):
+        """{slot: estado} a partir das classes dos slots. Serve dorf1
+        (`...buildingSlotN...good`) e dorf2 (`<a class="...aidN...good">`).
+        Prioriza 'good' quando o mesmo slot aparece mais de uma vez."""
+        estados = {}
+        for m in re.finditer(
+                r'class="([^"]*\b(?:buildingSlot|aid)(\d+)\b[^"]*)"', html):
+            slot = int(m.group(2))
+            est = next((c for c in m.group(1).split()
+                        if c in self.ESTADOS_SLOT), None)
+            if est and (slot not in estados or est == "good"):
+                estados[slot] = est
+        return estados
+
     def campos_recurso(self, html=None):
-        """Lista dos campos de dorf1: [{'slot','gid','nivel'}, ...]."""
+        """Campos de dorf1: [{'slot','gid','nivel','estado'}, ...]
+        (estado: good|notNow|maxLevel|underConstruction)."""
         if html is None:
             _, html = self.ir(self.base + "/dorf1.php", 4)
+        estados = self._estado_por_slot(html)
         campos = []
         for m in re.finditer(r"resourceField gid(\d) buildingSlot(\d+)\s+level(\d+)",
                              html):
-            campos.append({"slot": int(m.group(2)), "gid": int(m.group(1)),
-                           "nivel": int(m.group(3))})
+            slot = int(m.group(2))
+            campos.append({"slot": slot, "gid": int(m.group(1)),
+                           "nivel": int(m.group(3)), "estado": estados.get(slot)})
         return campos
 
     def evoluir_dorf1(self):
-        """Sobe o campo de MENOR nível (desempate aleatório). 'randômico'."""
-        campos = self.campos_recurso()
-        if not campos:
-            return False, "não consegui ler os campos"
-        menor = min(c["nivel"] for c in campos)
-        alvo = random.choice([c for c in campos if c["nivel"] == menor])
+        """Sobe o campo de MENOR nível QUE PODE evoluir agora (classe 'good';
+        desempate aleatório). Se nenhum está 'good', não navega à toa."""
+        bons = [c for c in self.campos_recurso() if c.get("estado") == "good"]
+        if not bons:
+            return False, "nenhum campo pode evoluir agora (sem recurso/fila)"
+        menor = min(c["nivel"] for c in bons)
+        alvo = random.choice([c for c in bons if c["nivel"] == menor])
         ok, _ = self.upgrade_campo(alvo["slot"], alvo["gid"])
         return ok, "campo slot %d (gid %d) nível %d->%d %s" % (
             alvo["slot"], alvo["gid"], menor, menor + 1,
-            "construindo" if ok else "fila cheia / sem recursos")
+            "construindo" if ok else "recusado")
 
     def edificios_dorf2(self, html=None):
-        """Edifícios construídos no dorf2: [{'slot','gid','nivel','nome'}]."""
+        """Edifícios do dorf2: [{'slot','gid','nivel','nome','estado'}]
+        (estado: good|notNow|maxLevel|underConstruction). De-duplicado por slot
+        (o mesmo slot pode aparecer repetido no HTML)."""
         if html is None:
             _, html = self.ir(self.base + "/dorf2.php", 4)
-        edis = []
+        estados = self._estado_por_slot(html)
+        por_slot = {}
         for m in re.finditer(
                 r'data-aid="(\d+)"[^>]*data-gid="(\d+)"[^>]*data-name="([^"]*)"'
                 r'[^>]*>\s*<a[^>]*data-level="(\d+)"', html, re.S):
             gid = int(m.group(2))
-            if gid != 0 and m.group(3):
-                edis.append({"slot": int(m.group(1)), "gid": gid,
-                             "nome": m.group(3), "nivel": int(m.group(4))})
-        return edis
+            if gid == 0 or not m.group(3):
+                continue
+            slot = int(m.group(1))
+            e = {"slot": slot, "gid": gid, "nome": m.group(3),
+                 "nivel": int(m.group(4)), "estado": estados.get(slot)}
+            if slot not in por_slot or e["nivel"] > por_slot[slot]["nivel"]:
+                por_slot[slot] = e
+        return list(por_slot.values())
 
     def evoluir_dorf2(self):
-        """Sobe o EDIFÍCIO de menor nível do dorf2 (desempate aleatório)."""
-        edis = self.edificios_dorf2()
-        if not edis:
-            return False, "não consegui ler os edifícios"
-        menor = min(e["nivel"] for e in edis)
-        alvo = random.choice([e for e in edis if e["nivel"] == menor])
+        """Sobe o EDIFÍCIO de menor nível QUE PODE evoluir agora (classe 'good';
+        desempate aleatório). Se nenhum está 'good', não navega à toa."""
+        bons = [e for e in self.edificios_dorf2() if e.get("estado") == "good"]
+        if not bons:
+            return False, "nenhum edifício pode evoluir agora (sem recurso/fila)"
+        menor = min(e["nivel"] for e in bons)
+        alvo = random.choice([e for e in bons if e["nivel"] == menor])
         ok = self._subir_verde(alvo["slot"], alvo["gid"])
         return ok, "%s slot %d nível %d->%d %s" % (
             alvo["nome"], alvo["slot"], menor, menor + 1,
-            "construindo" if ok else "fila cheia / sem recursos")
+            "construindo" if ok else "recusado")
 
     def criar_novo_dorf2(self, gids_desejados):
         """Constrói o 1º edifício DESEJADO (por gid, em ordem de prioridade) que
@@ -901,6 +939,50 @@ class Travian:
         return {"recompensa_disponivel": reward,
                 "tarefas": [(n, m, d.strip()) for n, m, d in tarefas],
                 "texto": t[:800]}
+
+    def recolher_diario(self, maximo=12):
+        """Abre o diálogo de tarefas diárias e COLETA tudo que estiver pronto,
+        repetindo até esvaziar (como recolher_missoes). Coleta:
+        - checkpoints de progresso ATINGIDOS: div.rewardImage.achieved -> abre o
+          popup -> botão .collectable;
+        - o botão 'Coletar recompensas' (.collectRewards) quando ativo (não
+          disabled). Classes internas do jogo (não dependem do idioma).
+        Devolve o nº de coletas feitas."""
+        self.ir(self.base + "/dorf1.php", 3)
+        self.enviar([                                  # abre o diálogo
+            {"type": "click", "xpath": '//a[contains(@class,"dailyQuests")]'},
+            {"type": "sleep", "value": 3},
+        ])
+        feitas = 0
+        for _ in range(maximo):
+            html = next((x["html"] for x in self.enviar([{"type": "html"}])
+                         if x["type"] == "html"), "")
+            # 1) checkpoint atingido (não 'locked'/'completed') -> popup -> coletar
+            if re.search(r'rewardImage\s+reward\d+\s+achieved', html):
+                self.enviar([
+                    {"type": "click",
+                     "xpath": '//div[contains(@class,"rewardImage") and '
+                              'contains(@class,"achieved")]'},
+                    {"type": "sleep", "value": 2},
+                    {"type": "click",
+                     "xpath": '//button[contains(@class,"collectable")]'},
+                    {"type": "sleep", "value": 2},
+                ])
+                feitas += 1
+                continue
+            # 2) botão 'Coletar recompensas' ATIVO (sem disabled)
+            if re.search(r'<button[^>]*\bcollectRewards\b(?:(?!disabled)[^>])*>',
+                         html):
+                self.enviar([
+                    {"type": "click",
+                     "xpath": '//button[contains(@class,"collectRewards") '
+                              'and not(@disabled)]'},
+                    {"type": "sleep", "value": 2},
+                ])
+                feitas += 1
+                continue
+            break                                      # nada mais a coletar
+        return feitas
 
     # ---- relatórios (batalha / aventura) ------------------------------
     def listar_relatorios(self, html=None):
@@ -1429,28 +1511,35 @@ def evoluir_estruturas(t, db, cfg, html_dorf2=None):
     if html_dorf2 is None:
         _, html_dorf2 = t.ir(t.base + "/dorf2.php", 4)
     edis = t.edificios_dorf2(html_dorf2)
-    nivel = {}
+    nivel, slot_good = {}, {}
     for e in edis:
         nivel[e["gid"]] = max(nivel.get(e["gid"], 0), e["nivel"])
-    cand = [(alvo - nivel.get(gid, 0), gid, nome, alvo, nivel.get(gid, 0))
-            for gid, nome, alvo in estruturas if alvo - nivel.get(gid, 0) > 0]
+        if e.get("estado") == "good":                    # slot evoluível de menor nível
+            cur = slot_good.get(e["gid"])
+            if cur is None or e["nivel"] < cur[0]:
+                slot_good[e["gid"]] = (e["nivel"], e["slot"])
+    cand = []
+    for gid, nome, alvo in estruturas:
+        atual = nivel.get(gid, 0)
+        if alvo - atual <= 0:
+            continue                                     # já no alvo
+        existe = gid in nivel
+        if existe and gid not in slot_good:
+            continue   # existe mas não 'good' (sem recurso/máximo/fila) -> pula
+        cand.append((alvo - atual, gid, nome, alvo, atual, existe))
     if not cand:
-        return False, "todas no alvo"
-    maxd = max(c[0] for c in cand)                       # mais longe do objetivo
-    _, gid, nome, alvo, atual = random.choice([c for c in cand if c[0] == maxd])
-    # Ponto de Encontro (39) e Muro (40) têm slot fixo e já existem na aldeia.
-    slot_fixo = 40 if gid in GIDS_MURO else (39 if gid == 16 else None)
-    if slot_fixo is not None:
-        ok = t._subir_verde(slot_fixo, gid)
-        return ok, "%s slot %d %d->%d (%s)" % (nome, slot_fixo, atual, atual + 1,
-                                               "construindo" if ok else "recusado")
-    existe = [e for e in edis if e["gid"] == gid]
-    if existe:
-        slot = min(existe, key=lambda e: e["nivel"])["slot"]
+        return False, "nada elegível agora (no alvo ou sem recurso)"
+    maxd = max(c[0] for c in cand)                        # mais longe do objetivo
+    _, gid, nome, alvo, atual, existe = random.choice(
+        [c for c in cand if c[0] == maxd])
+    if existe:                                            # sobe o slot 'good'
+        slot = slot_good[gid][1]
         ok = t._subir_verde(slot, gid)
-        return ok, "%s %d->%d (%s)" % (nome, atual, atual + 1,
-                                       "construindo" if ok else "recusado")
-    slot = t._primeiro_slot_vazio(html_dorf2)
+        return ok, "%s slot %d %d->%d (%s)" % (nome, slot, atual, atual + 1,
+                                               "construindo" if ok else "recusado")
+    # não existe -> constrói. Ponto de Encontro (39) e Muro (40) têm slot fixo.
+    slot = 40 if gid in GIDS_MURO else (
+        39 if gid == 16 else t._primeiro_slot_vazio(html_dorf2))
     if slot is None:
         return False, "%s: sem slot vazio" % nome
     ok = t.construir(slot, gid)
@@ -1737,7 +1826,7 @@ def ciclo(t, db, cfg):
         t.comentar_script("tarefas_diarias")          # VII/XIX
         dq = t.ler_tarefas_diarias()
         log.append("daily(reward=%s)" % dq["recompensa_disponivel"])
-    if not t.heroi_em_aventura(html):
+    if t.heroi_em_casa(html):                         # heroHome: só age com herói em casa
         if t.num_aventuras(html) > 0:
             t.comentar_script("aventura")             # VII/XIX
             log.append("aventura: %s" % t.fazer_aventura()[1])

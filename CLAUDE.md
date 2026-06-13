@@ -60,14 +60,22 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
   the green "Melhorar/build" button when it's enabled — the game only enables
   it when there's a free queue slot *and* enough resources, so this is the
   source of truth rather than guessing.
+- **Slot state class (`good`).** Each field/building slot carries a state class
+  read by `_estado_por_slot()` (works for dorf1 `...buildingSlotN...good` and
+  dorf2 `<a class="...aidN...good">`): `good` = upgradable **now**, `notNow` =
+  not enough resources, `maxLevel` = capped, `underConstruction` = in queue.
+  `campos_recurso`/`edificios_dorf2` expose it as `estado`; `evoluir_dorf1`,
+  `evoluir_dorf2` and `evoluir_estruturas` only pick `good` slots, so they don't
+  navigate to a build page that can't proceed.
 - **Mission rewards have no storage cap** — they go to the hero ("barra azul"),
   so `recolher_missoes()` collects everything unconditionally, re-reading
   `/tasks` after each collect (the UI removes buttons asynchronously).
 - **Hero → warehouse transfers cap at 80%** of capacity to leave room for
   production. The confirm button is the **second** "Transferência" button (the
   first is "max", which ignores the typed amounts).
-- **Adventures** require hero not already out, an available adventure, and
-  health > 50%.
+- **Adventures** require the hero **home** (`heroi_em_casa()`: the dorf1 hero
+  icon has class `heroHome`; away = `heroRunning`/etc. — more reliable than the
+  old "tropas saindo Aventura" text), an available adventure, and health > 50%.
 
 ## The executor
 
@@ -220,6 +228,6 @@ running browser server — they hit the real game server.
   `coords_aldeia`, etc.).
 - Each subsystem has a learning doc under `docs/<tema>/` capturing the
   reverse-engineered selectors, API shapes, and gotchas (login, construcao,
-  missoes, heroi, oasis-mapa, roadmap). Read the relevant doc before changing a
+  missoes, heroi, oasis-mapa, tarefas-diarias, roadmap). Read the relevant doc before changing a
   scraper — the regexes encode hard-won details about Travian's DOM.
 - Never put credentials in code; they come from the account `.env` or env vars.

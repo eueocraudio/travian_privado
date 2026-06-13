@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
     --server)  SERVER="${2:-}";  shift 2 ;;
     --account) ACCOUNT="${2:-}"; shift 2 ;;
     --porta)   PORTA_CLI="${2:-}"; shift 2 ;;
-    parar|ciclo|loop) COMANDO="$1"; shift ;;
+    parar|ciclo|loop|abrir) COMANDO="$1"; shift ;;
     *) echo "ERRO: argumento desconhecido: $1" >&2; exit 2 ;;
   esac
 done
@@ -161,6 +161,7 @@ echo "==> garantindo login"
 "$PY_BOT" "$RAIZ/travian.py" login || exit 1
 
 case "$COMANDO" in
+  abrir) echo "==> browser aberto e logado (em dorf1) na porta $PORTA — não entra no loop." ;;
   ciclo) echo "==> uma passada (ciclo)"; "$PY_BOT" "$RAIZ/travian.py" ciclo ;;
   *)     echo "==> entrando no loop (Ctrl+C para parar)"; "$PY_BOT" -u "$RAIZ/travian.py" loop ;;
 esac

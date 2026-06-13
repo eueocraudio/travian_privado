@@ -73,3 +73,17 @@ Enviar com:
 - Botão: "Melhorar para nível 1" (verde, recursos suficientes).
 - Resultado: construção enfileirada (timer ~145s); estoque caiu de ~800 cada
   para `800/730/710/729` (madeira/barro/ferro/cereal) = custo pago.
+
+## Estado do slot pela classe `good` (validado ao vivo 2026-06-13)
+
+Cada slot (campo no dorf1, edifício no dorf2) carrega no `class` o estado de
+construção, que diz se dá pra evoluir **agora** sem navegar à página de build:
+
+- `good` — evoluível agora (fila livre + recursos). Ex. dorf2:
+  `<a href="/build.php?id=26&gid=15" class="level colorLayer good aid26 roman" data-level="2">`
+- `notNow` — falta recurso; `maxLevel` — nível máximo; `underConstruction` — na fila.
+
+Formatos diferentes por página (dorf1: `...resourceField gidG buildingSlotN levelL ... good`;
+dorf2: `<a class="...aidN...good">` com `gid` no href), mas `Travian._estado_por_slot(html)`
+lê `{slot: estado}` dos dois. `campos_recurso`/`edificios_dorf2` trazem `estado`;
+`evoluir_dorf1`/`evoluir_dorf2`/`evoluir_estruturas` só escolhem slots `good`.

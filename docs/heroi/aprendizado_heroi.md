@@ -52,3 +52,18 @@ Testado: estoque foi a ~960 (80% de 1200), não a 1200.
 
 No script: `python travian.py adventure` (`Travian.fazer_aventura(vida_minima=50)`).
 Testado: enviou com vida 100%; depois recusou ("já a caminho de uma aventura").
+
+## Herói disponível: classe `heroHome` (validado ao vivo 2026-06-13)
+
+Forma confiável (independe de idioma) de saber se o herói está **em casa /
+disponível**: no dorf1, o ícone do herói é um link cujo `<i>` tem a classe
+`heroHome` quando ele está na aldeia:
+
+```html
+<a href="/build.php?...id=39...&tt=2" class=""><i class="heroHome"></i></a>
+```
+
+Quando o herói está fora a classe muda (`heroRunning` a caminho/voltando, etc.).
+`Travian.heroi_em_casa(html)` testa `class="...heroHome..."`; `heroi_em_aventura`
+virou "não está em casa". O ciclo e `fazer_aventura` só agem com `heroHome`
+presente — substitui o antigo texto frágil "tropas saindo Aventura".
