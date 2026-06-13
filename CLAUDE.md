@@ -119,6 +119,19 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
   `recolher_relatorios()` to fetch unread attack reports before closing (so the
   next session's strategy sees them). `recolher_relatorios()` is the shared
   "read only new `rid`s" helper used by both the cycle and shutdown.
+- **Army training (agressivo only).** When the strategy is `agressivo`,
+  `decidir_dorf2()` makes sure a Barracks (gid 19) gets built, and the per-cycle
+  `treinar_exercito()` trains a small batch (`EXERCITO_LOTE`) of `EXERCITO_TROPA`
+  until the home army reaches `EXERCITO_PCT_POP`% of the village population
+  (`Travian.populacao()`). `populacao()`/`treinar_tropa()` selectors are not yet
+  validated live — see the *exercito-agressivo* / *validar-seletores-vivo*
+  memories.
+- **Hot-reload loop.** The `loop` re-imports `travian.py` every cycle via
+  `_recarregar_modulo()` (fresh `travian_live` module), re-reads `.env`, rebuilds
+  the strategy and recreates `t`, then calls `mod.ciclo(...)`. This picks up code
+  and `.env` edits without restarting — the session lives in the browser server,
+  so recreating `t` doesn't log out; `db` is kept. A bad reload (syntax error)
+  falls back to the previous version. See the *hot-reload-loop* memory.
 - **Cycle hygiene knobs (recent).** `ir()` skips the reload when already on the
   target URL (re-reads HTML only) unless `recarregar=True`; the `loop` navigates
   to `google.com` while sleeping (stays off the game between cycles); reports are

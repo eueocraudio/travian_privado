@@ -41,6 +41,7 @@ Uso: python3 travian.py <comando>
     #               python3 travian.py status
 """
 
+import importlib.util
 import json
 import os
 import random
@@ -90,6 +91,9 @@ SCRIPTS = {
     # enquanto há proteção de iniciante; sobe até MURO_NIVEL_ALVO (5) no slot
     # fixo 40 (local específico do muro). gid por tribo (gid_muro).
     "muro":            {"tipo": "agendado", "feito": True},
+    # treino de exército: SÓ no modo agressivo (ESTRATEGIA). Constrói quartel
+    # (gid 19) via dorf2 e treina aos poucos até EXERCITO_PCT_POP% da população.
+    "treinar_exercito": {"tipo": "loop", "feito": True},
     # atacar_oasis: assalto a oásis sem defesa (gated por OASIS_ATIVO no .env;
     # aventura SEMPRE roda antes no ciclo). Conservador: só sem_tropas=1.
     "atacar_oasis":    {"tipo": "agendado", "feito": True},
@@ -166,6 +170,11 @@ class Travian:
         except Exception:
             pass
 
+    def comentar_script(self, nome):
+        """XIX: comentário-banner padronizado no início de um script."""
+        self.comentar("============== %s =================="
+                      % str(nome).upper())
+
     def titulo(self, texto):
         """Troca o título da janela do browser (action 'title' — fura a fila)."""
         try:
@@ -228,6 +237,19 @@ class Travian:
             if cap:
                 return _num(cap.group(1))
         return 0
+
+    def populacao(self, html=None):
+        """População da aldeia (lida do dorf1). Regex defensivo; None se não
+        achar. SELETOR a confirmar AO VIVO."""
+        if html is None:
+            _, html = self.ir(self.base + "/dorf1.php", 4)
+        # 'inhabitants'/'population' no infobox da aldeia; cai no texto se falhar
+        m = re.search(r'class="[^"]*(?:population|inhabitants)[^"]*"[^>]*>\s*'
+                      r'([0-9.,‭‬]+)', html)
+        if not m:
+            txt = re.sub(r"<[^>]+>", " ", html).replace("‭", "").replace("‬", "")
+            m = re.search(r"Popula\w+\D{0,15}([0-9.,]+)", txt)
+        return _num(m.group(1)) if m else None
 
     # ---- herói: vida e aventuras --------------------------------------
     def vida_heroi(self):
@@ -681,6 +703,38 @@ class Travian:
             m2 = re.search(r"(\d[\d.‭‬]*)", cauda)
             disp[mm.group(1)] = _num(m2.group(1)) if m2 else None
         return disp, html
+
+    def contar_tropas_casa(self):
+        """Total de tropas de exército em casa AGORA (soma dos inputs de envio,
+        excluindo o herói t11)."""
+        disp, _ = self.tropas_disponiveis_ataque()
+        return sum(q for tn, q in disp.items() if tn != "t11" and q)
+
+    def tem_quartel(self, html_dorf2=None):
+        """True se há um Quartel (gid 19) no dorf2."""
+        return any(e["gid"] == 19 for e in self.edificios_dorf2(html_dorf2))
+
+    def treinar_tropa(self, tropa, qtd):
+        """Treina 'qtd' da unidade 'tropa' (t1..) no Quartel (gid 19). Abre a
+        página do quartel, escreve a quantidade e clica em treinar.
+        SELETORES do form de treino a confirmar AO VIVO. Devolve (ok, msg)."""
+        if qtd <= 0:
+            return False, "qtd<=0"
+        q = next((e for e in self.edificios_dorf2() if e["gid"] == 19), None)
+        if not q:
+            return False, "sem quartel"
+        self.ir(self.base + "/build.php?id=%d&gid=19" % q["slot"], 4)
+        self.enviar([
+            {"type": "key", "xpath": '//input[@name="%s"]' % tropa,
+             "value": str(int(qtd))},
+            {"type": "sleep", "value": SLEEP_TOQUE},
+            {"type": "click",
+             "xpath": "//button[contains(@class,'startTraining') or "
+                      "contains(@class,'green')]"},
+            {"type": "sleep", "value": 3},
+        ])
+        return True, "treinou %d %s (quartel slot %d)" % (int(qtd), tropa,
+                                                          q["slot"])
 
     def _enviar_assalto(self, x, y, tropas, mandar_heroi):
         """Preenche destino + tropas (força máxima), marca Assalto (eventType=4),
@@ -1215,10 +1269,10 @@ def prob_esconderijo(db, html):
 
 def decidir_dorf2(t, db, cfg, html_dorf1):
     """Decisão do dorf2, por prioridade:
-    1) X: MURO até MURO_NIVEL_ALVO (5) ENQUANTO há proteção de iniciante — o
-       muro precisa estar levantado antes de a proteção acabar;
-    2) RAMPA DO ESCONDERIJO ('na sorte', sobe com o fim da proteção);
-    3) evoluir × criar novo (base normal)."""
+    1) X: MURO até MURO_NIVEL_ALVO (5) ENQUANTO há proteção de iniciante;
+    2) XVI: no modo AGRESSIVO, garante o QUARTEL (gid 19) se ainda falta;
+    3) RAMPA DO ESCONDERIJO ('na sorte', sobe com o fim da proteção);
+    4) evoluir × criar novo (base normal)."""
     cfg = cfg or {}
     # 1) MURO durante a proteção (só local específico: slot 40).
     prot = protecao_restante_seg(html_dorf1)
@@ -1228,7 +1282,12 @@ def decidir_dorf2(t, db, cfg, html_dorf1):
         if okm:
             return okm, "MURO(prot %dh%02dm): %s" % (
                 prot // 3600, (prot % 3600) // 60, msgm)
-        # muro já no alvo OU recusado (fila/recurso) -> tenta esconderijo/normal
+        # muro já no alvo OU recusado (fila/recurso) -> tenta o resto
+    # 2) AGRESSIVO: precisa de quartel p/ treinar exército (criar só se faltar).
+    if (cfg.get("_estrategia") or {}).get("modo") == "agressivo":
+        okq, msgq = t.criar_novo_dorf2([19])         # 19 = Quartel
+        if okq:
+            return okq, "QUARTEL: " + msgq
     p = prob_esconderijo(db, html_dorf1)
     nivel_alvo = int(cfg.get("CRANNY_NIVEL_ALVO", "10"))
     if random.random() < p:
@@ -1238,6 +1297,36 @@ def decidir_dorf2(t, db, cfg, html_dorf1):
         ok2, msg2 = t.construir_ou_evoluir_dorf2(cfg)   # já no alvo/recusa -> normal
         return ok2, "ESCONDERIJO(p=%.0f%%) n/d (%s) -> %s" % (p * 100, msg, msg2)
     return t.construir_ou_evoluir_dorf2(cfg)
+
+
+def treinar_exercito(t, db, cfg, html_dorf1):
+    """XVI: só no modo AGRESSIVO, mantém um exército proporcional à população
+    (alvo = EXERCITO_PCT_POP% da pop.), treinando AOS POUCOS (EXERCITO_LOTE por
+    ciclo) a unidade EXERCITO_TROPA no quartel. Não constrói (o quartel entra
+    pelo dorf2). Devolve uma string de log, ou None se não se aplica."""
+    cfg = cfg or {}
+    if (cfg.get("_estrategia") or {}).get("modo") != "agressivo":
+        return None
+    try:
+        pct = float(cfg.get("EXERCITO_PCT_POP", "0") or 0)
+    except ValueError:
+        pct = 0
+    if pct <= 0:
+        return None
+    pop = t.populacao(html_dorf1)
+    if not pop:
+        return "treino: população não lida"
+    alvo = int(round(pop * pct / 100.0))
+    atual = t.contar_tropas_casa()
+    if atual >= alvo:
+        return "treino: exército %d >= alvo %d (%.0f%% de %d)" % (
+            atual, alvo, pct, pop)
+    if not t.tem_quartel():
+        return "treino: aguardando quartel (em construção?)"
+    lote = int(cfg.get("EXERCITO_LOTE", "5") or 5)
+    tropa = (cfg.get("EXERCITO_TROPA") or "t1").strip()
+    _, msg = t.treinar_tropa(tropa, min(lote, alvo - atual))
+    return "treino(%d/%d): %s" % (atual, alvo, msg)
 
 
 def rotulo_conta():
@@ -1353,7 +1442,7 @@ def agendar_imediato(db, nome):
 
 def _exec_script(nome, t, db, cfg):
     """Executa um script pelo nome (usado pelo slot imediato)."""
-    t.comentar("script: %s" % nome)              # VII: anota antes de executar
+    t.comentar_script(nome)                      # VII/XIX: banner antes de executar
     if nome == "transferir_recursos":
         _, _, _, fez = t.transferir_recursos()
         # marca se foi inútil (herói vazio) p/ evoluir_controlado não reagendar
@@ -1411,7 +1500,7 @@ def ciclo(t, db, cfg):
 
     # --- OBRIGATÓRIOS (só agem se o indicador/condição manda) ---
     if re.search(r'id="questmasterButton"[^>]*\bclaimable\b', html):
-        t.comentar("recolher_missoes")                # VII
+        t.comentar_script("recolher_missoes")         # VII/XIX
         n = t.recolher_missoes()
         if n:
             log.append("collect=%d" % n)
@@ -1419,17 +1508,18 @@ def ciclo(t, db, cfg):
     # lista, só abre os rid que ainda não estão salvos (não relê os já lidos).
     rind = re.search(r'class="reports"[^>]*>\s*<div class="indicator">(\d+)', html)
     if rind and int(rind.group(1)) > 0:
-        t.comentar("ler_relatorios (%s não lidos)" % rind.group(1))  # VII
+        t.comentar_script("ler_relatorios")           # VII/XIX
+        t.comentar("%s relatório(s) não lido(s)" % rind.group(1))
         log.append("reports=%d" % recolher_relatorios(t, db))        # I
     if t.tem_tarefas_diarias(html):
-        t.comentar("tarefas_diarias")                 # VII
+        t.comentar_script("tarefas_diarias")          # VII/XIX
         dq = t.ler_tarefas_diarias()
         log.append("daily(reward=%s)" % dq["recompensa_disponivel"])
     if not t.heroi_em_aventura(html):
         if t.num_aventuras(html) > 0:
-            t.comentar("aventura")                    # VII
+            t.comentar_script("aventura")             # VII/XIX
             log.append("aventura: %s" % t.fazer_aventura()[1])
-        t.comentar("evoluir_heroi")                   # VII
+        t.comentar_script("evoluir_heroi")            # VII/XIX
         okh, msgh = t.evoluir_heroi(cfg.get("HEROI_ATRIBUTO", "producao"))
         if okh:
             log.append("hero: %s" % msgh)
@@ -1440,11 +1530,11 @@ def ciclo(t, db, cfg):
     tribo = tribo_conta(t, db)
     if tribo and tribo.lower().startswith("romano"):
         for onde in ("dorf1", "dorf2"):
-            t.comentar("construir_%s" % onde)         # VII
+            t.comentar_script("construir_%s" % onde)  # VII/XIX
             oke, msge = evoluir_controlado(t, db, onde, html, cfg)
             log.append("evolve %s: %s" % (onde, msge))
     else:
-        t.comentar("construir")                       # VII
+        t.comentar_script("construir")                # VII/XIX
         oke, msge = evoluir_controlado(t, db, None, html, cfg)
         log.append("evolve: %s" % msge)
 
@@ -1454,7 +1544,7 @@ def ciclo(t, db, cfg):
               - datetime.fromisoformat(ult)).total_seconds() / 3600
              if ult else None)
     if horas is None or horas >= 23:
-        t.comentar("scan_mapa")                       # VII
+        t.comentar_script("scan_mapa")                # VII/XIX
         nt, _no = t.escanear_mapa(db)
         meta_set(db, "ultimo_scan_mapa", _agora())
         log.append("scan(%d tiles)" % nt)
@@ -1470,10 +1560,16 @@ def ciclo(t, db, cfg):
         log.append("movs=%d" % len(movs))
     db.commit()
 
+    # --- XVI: treino de exército (só agressivo), aos poucos, alvo % da pop. ---
+    msg_tr = treinar_exercito(t, db, cfg, html)
+    if msg_tr:
+        t.comentar_script("treinar_exercito")         # VII/XIX
+        log.append(msg_tr)
+
     # --- assalto a oásis (agendado; aventura já rodou acima). II: decide se há
     # exército olhando o dorf1 já lido; só ataca quando há tropa. ---
     if oasis_habilitado(t, db, cfg, html):
-        t.comentar("atacar_oasis")                    # VII
+        t.comentar_script("atacar_oasis")             # VII/XIX
         oko, msgo = t.atacar_oasis(db, cfg)
         if "sem tropa" in msgo:        # exército acabou -> volta a checar depois
             meta_set(db, "tem_exercito", "")
@@ -1577,6 +1673,23 @@ def snapshot_estado(db, est, missoes=None):
     db.commit()
 
 
+def _recarregar_modulo():
+    """XVII: reexecuta ESTE arquivo do zero e devolve o módulo recarregado, para
+    o loop assumir o código mais recente a cada ciclo SEM reiniciar o processo —
+    a sessão do jogo vive no browser servidor (outro processo), então não
+    desloga. Devolve None se a recarga falhar (ex.: erro de sintaxe numa edição
+    em andamento): o loop mantém a versão anterior e segue."""
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "travian_live", os.path.abspath(__file__))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        print("  [hot-reload] recarga falhou, mantendo versão atual: %s" % e)
+        return None
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     conta_dir, base, email, senha, cfg = resolver_conta()
@@ -1647,19 +1760,35 @@ def main():
         print("ciclo:", resumo)
         ok, detalhe = True, resumo
     elif cmd == "loop":
-        print("== loop executor (Ctrl+C para parar) ==")
+        print("== loop executor (hot-reload a cada ciclo; Ctrl+C para parar) ==")
+        mod = sys.modules[__name__]          # começa com a versão em execução
         try:
             while True:
-                resumo = ciclo(t, db, cfg)
-                print("[%s] %s" % (_agora(), resumo))
-                if meta_get(db, "proximo_imediato"):
+                # XVII: reimporta o arquivo p/ pegar edições do código/.env sem
+                # reiniciar. A sessão fica no browser, então recriar 't' não
+                # desloga; 'db' (estado/scheduler) é mantido.
+                novo = _recarregar_modulo()
+                if novo is not None:
+                    mod = novo
+                    try:
+                        _cd, base2, em, se, cfg = mod.resolver_conta()
+                        cfg["_estrategia"] = mod.montar_estrategia(db, cfg)
+                        t = mod.Travian(base=base2, email=em, senha=se)
+                    except Exception as e:
+                        print("  [hot-reload] recarga de conta falhou: %s" % e)
+                resumo = mod.ciclo(t, db, cfg)
+                print("[%s] %s" % (mod._agora(), resumo))
+                if mod.meta_get(db, "proximo_imediato"):
                     seg = 60   # há script imediato pendente -> acorda logo
                     print("  script imediato na fila -> dormindo ~1 min...")
                 else:
-                    seg = proximo_evento_seg(db)
+                    seg = mod.proximo_evento_seg(db)
                     print("  dormindo ~%d min até o próximo evento..." % (seg // 60))
                 # IV: enquanto dorme, sai do jogo (fica numa página neutra).
-                t.comentar("dormindo ~%d min" % (seg // 60))
+                # XVIII: avisa a hora de retorno no comentário.
+                volta = (datetime.now(timezone.utc).astimezone()
+                         + timedelta(seconds=seg)).strftime("%H:%M")
+                t.comentar("dormindo ~%d min (volto %s)" % (seg // 60, volta))
                 t.enviar([{"type": "navigate", "value": "https://www.google.com"},
                           {"type": "sleep", "value": 1}])
                 time.sleep(seg)
@@ -1669,7 +1798,7 @@ def main():
         # alimenta o SQLite p/ a estratégia da próxima sessão (ver XIII).
         try:
             t.comentar("saindo: recolhendo relatórios não lidos")
-            n = recolher_relatorios(t, db)
+            n = mod.recolher_relatorios(t, db)
             print("  recolhidos %d relatório(s) antes de sair" % n)
         except Exception as e:
             print("  (não consegui recolher antes de sair: %s)" % e)
