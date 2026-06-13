@@ -127,20 +127,26 @@ class Travian:
             arq.flush()
             return json.loads(arq.readline()).get("resultados", [])
 
-    def ir(self, url, espera=5, recarregar=False):
+    def ir(self, url, espera=5, recarregar=False, _relogin=True):
         """Navega e devolve (url_final, html). Faz uma pausa aleatória
         (SLEEP_NAV_MIN..MAX) ANTES de navegar — comportamento humano — e
         depois espera 'espera' s para a página carregar/renderizar.
 
         Se já estamos NA url alvo (e recarregar=False), relê o HTML sem
         recarregar a página — evita reloads redundantes/suspeitos. Passe
-        recarregar=True quando precisar de um refetch fresco do servidor."""
+        recarregar=True quando precisar de um refetch fresco do servidor.
+
+        Se a navegação para uma página do JOGO cair na TELA DE LOGIN (sessão
+        expirada), faz login e re-navega automaticamente — assim os scripts não
+        ficam batendo em URLs internas sempre redirecionadas pro login."""
         if not recarregar:
             atual = self.url_atual()
             if atual and self._mesma_url(atual, url):
                 r = self.enviar([{"type": "url"}, {"type": "html"}])
                 u = next((x["url"] for x in r if x["type"] == "url"), atual)
                 h = next((x["html"] for x in r if x["type"] == "html"), "")
+                if _relogin and self._caiu_no_login(url, h):
+                    return self._relogar_e_voltar(url, espera)
                 return u, h
         time.sleep(random.randint(SLEEP_NAV_MIN, SLEEP_NAV_MAX))
         r = self.enviar([
@@ -151,7 +157,26 @@ class Travian:
         ])
         u = next((x["url"] for x in r if x["type"] == "url"), None)
         h = next((x["html"] for x in r if x["type"] == "html"), "")
+        if _relogin and self._caiu_no_login(url, h):
+            return self._relogar_e_voltar(url, espera)
         return u, h
+
+    def _caiu_no_login(self, url, html):
+        """True se navegamos para uma página do JOGO (self.base) mas caímos na
+        tela de login (sessão expirada): sem a barra de recursos E com sinais de
+        formulário de login. Não dispara fora do servidor de jogo (ex.: google)."""
+        if not url or not url.startswith(self.base):
+            return False
+        if self.esta_logado(html):
+            return False
+        return bool(re.search(r'name="password"|loginLobby|login(Form|Button)|'
+                              r'class="[^"]*\blogin\b', html or "", re.I))
+
+    def _relogar_e_voltar(self, url, espera):
+        """Faz login e re-navega para 'url' UMA vez (_relogin=False evita laço)."""
+        self.comentar("sessão expirada -> refazendo login")
+        self.login()
+        return self.ir(url, espera, recarregar=True, _relogin=False)
 
     @staticmethod
     def _mesma_url(a, b):
@@ -195,12 +220,12 @@ class Travian:
         (navegar pro dorf1 cai no jogo, não na tela de login), NÃO refaz o
         login — reusa a sessão persistente do perfil. Só autentica quando a
         página de login aparece."""
-        u, html = self.ir(self.base + "/dorf1.php", 6)
+        u, html = self.ir(self.base + "/dorf1.php", 6, _relogin=False)
         if self.esta_logado(html):
             self.comentar("já logado (sessão do perfil)")
             return u
         self.comentar("fazendo login")
-        u, _ = self.ir(self.base, 6, recarregar=True)
+        u, _ = self.ir(self.base, 6, recarregar=True, _relogin=False)
         self.enviar([
             {"type": "key", "xpath": "//input[@name='name']", "value": self.email},
             {"type": "key", "xpath": "//input[@name='password']", "value": self.senha},

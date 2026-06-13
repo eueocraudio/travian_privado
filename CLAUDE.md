@@ -134,6 +134,13 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
   and `.env` edits without restarting — the session lives in the browser server,
   so recreating `t` doesn't log out; `db` is kept. A bad reload (syntax error)
   falls back to the previous version. See the *hot-reload-loop* memory.
+- **Auto-relogin on navigation.** `ir()` checks every navigation to a game URL
+  (`self.base`): if it lands on the login screen (no resource bar — `esta_logado`
+  false — plus a login-form signal, `_caiu_no_login()`), it calls `login()` and
+  re-navigates once. This stops the bot from hammering internal URLs that keep
+  redirecting to login after the session expires. `login()` and the retry pass
+  `_relogin=False` to avoid infinite recursion; `google.com` (the sleep page) is
+  outside `base`, so it never triggers.
 - **Cycle hygiene knobs (recent).** `ir()` skips the reload when already on the
   target URL (re-reads HTML only) unless `recarregar=True`; the `loop` navigates
   to `google.com` while sleeping (stays off the game between cycles); reports are
