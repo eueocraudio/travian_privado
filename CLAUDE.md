@@ -160,7 +160,10 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
 ./interativo.sh              # ask + loop
 ./interativo.sh ciclo        # ask + one pass
 ./interativo.sh all          # bring up EVERY account in parallel (one browser/
-                             # port each); also the "(all)" item in the menu.
+                             # port each); also the "(all)" item in the menu. In
+                             # loop mode it stays a supervisor: every ALL_INTERVALO
+                             # s (default 30) it rescans accounts and launches a
+                             # browser for any new (or crashed) account.
                              # Ctrl+C stops all loops and the browsers it started.
 
 # Direct CLI (assumes the browser server is already up on PORTA=9000):

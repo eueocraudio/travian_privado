@@ -11,11 +11,14 @@
 # Uso:
 #   ./interativo.sh           # pergunta server+conta e entra no loop
 #   ./interativo.sh ciclo     # pergunta server+conta e roda só uma passada
-#   ./interativo.sh all       # sobe TODAS as contas em paralelo (loop)
+#   ./interativo.sh all       # sobe TODAS as contas em paralelo (loop) e VIGIA
 #   ./interativo.sh all ciclo # TODAS as contas em paralelo, uma passada cada
 #
 # No menu interativo de server também há a opção "(all)" para subir todas.
-# Ctrl+C encerra todos os loops e derruba os browsers das portas usadas.
+# No modo loop, o 'all' fica de supervisor: a cada ALL_INTERVALO segundos
+# (padrão 30) relista as contas e sobe um novo browser para qualquer conta nova
+# (cadastrada depois) ou que tenha caído. Ctrl+C encerra tudo e derruba os
+# browsers das portas usadas.
 #
 set -u
 
@@ -84,31 +87,63 @@ escolher() {
   echo "$escolha"
 }
 
-# Sobe TODAS as contas em paralelo, uma porta/browser por conta.
-subir_todas() {
-  local contas=()
-  mapfile -t contas < <(listar_todas_contas)
-  [ "${#contas[@]}" -gt 0 ] || { echo "nenhuma conta em $ACC" >&2; exit 1; }
-  local logdir="$DADOS/logs"; mkdir -p "$logdir"
-  local pids=() portas=() conta srv usr porta log
-  # Ctrl+C: além de matar os loops (mesmo grupo de processo), derruba os
-  # browsers (nohup, desacoplados) das portas usadas.
-  trap 'echo; echo "== encerrando: parando browsers das portas usadas ==";
-        for p in "${portas[@]}"; do "$RAIZ/iniciar.sh" --porta "$p" parar \
-          >/dev/null 2>&1; done' INT TERM
-  echo "== modo ALL: ${#contas[@]} conta(s) em paralelo (comando: $COMANDO) =="
-  for conta in "${contas[@]}"; do
-    srv="${conta%%/*}"; usr="${conta#*/}"
-    porta="$(proxima_porta)" || { echo "  sem porta livre p/ $conta" >&2; break; }
-    log="$logdir/${srv}__${usr}.log"
-    echo "  -> $conta  porta $porta  (log: $log)"
-    "$RAIZ/iniciar.sh" --server "$srv" --account "$usr" --porta "$porta" \
-        "$COMANDO" >"$log" 2>&1 &
-    pids+=("$!"); portas+=("$porta")
-    sleep 2   # respiro entre browsers (cada um é pesado)
+# Registro do que o supervisor 'all' já lançou: conta -> porta / conta -> pid.
+declare -A ALL_PORTA=()
+declare -A ALL_PID=()
+# Intervalo (s) entre varreduras à procura de contas novas (modo loop).
+INTERVALO_ALL="${ALL_INTERVALO:-30}"
+
+# Ctrl+C: derruba os browsers (nohup, desacoplados) das portas que subimos.
+_limpar_all() {
+  echo; echo "== encerrando: parando browsers das portas usadas =="
+  local c
+  for c in "${!ALL_PORTA[@]}"; do
+    "$RAIZ/iniciar.sh" --porta "${ALL_PORTA[$c]}" parar >/dev/null 2>&1
   done
-  echo "== ${#pids[@]} processo(s) no ar. Ctrl+C encerra todos. Logs: $logdir =="
-  wait
+  exit 0
+}
+
+# Sobe UMA conta em paralelo (browser/porta próprios) e registra pid/porta.
+_subir_conta() {
+  local conta="$1" srv usr porta log
+  srv="${conta%%/*}"; usr="${conta#*/}"
+  porta="$(proxima_porta)" || { echo "  sem porta livre p/ $conta" >&2; return 1; }
+  log="$DADOS/logs/${srv}__${usr}.log"
+  echo "  + subindo $conta  porta $porta  (log: $log)"
+  "$RAIZ/iniciar.sh" --server "$srv" --account "$usr" --porta "$porta" \
+      "$COMANDO" >>"$log" 2>&1 &
+  ALL_PID[$conta]="$!"; ALL_PORTA[$conta]="$porta"
+  sleep 2   # respiro entre browsers (cada um é pesado)
+}
+
+# Sobe TODAS as contas e — no modo loop — fica VIGIANDO: a cada INTERVALO_ALL
+# segundos relista as contas e sobe qualquer uma que ainda não tenha
+# browser/loop (conta nova cadastrada depois) ou cujo processo tenha caído.
+subir_todas() {
+  mkdir -p "$DADOS/logs"
+  [ -n "$(listar_todas_contas)" ] || { echo "nenhuma conta em $ACC" >&2; exit 1; }
+  trap _limpar_all INT TERM
+  echo "== modo ALL (comando: $COMANDO) =="
+  local conta
+  while true; do
+    local novas=0
+    while IFS= read -r conta; do
+      [ -n "$conta" ] || continue
+      if [ -n "${ALL_PORTA[$conta]:-}" ]; then
+        # já lançada: se o processo ainda vive, nada a fazer.
+        kill -0 "${ALL_PID[$conta]:-0}" 2>/dev/null && continue
+        # caiu -> derruba o browser antigo e relança numa porta nova.
+        "$RAIZ/iniciar.sh" --porta "${ALL_PORTA[$conta]}" parar >/dev/null 2>&1
+        echo "  ! $conta caiu -> relançando"
+      fi
+      _subir_conta "$conta" && novas=$((novas + 1))
+    done < <(listar_todas_contas)
+    if [ "$COMANDO" = "ciclo" ]; then
+      wait; break                     # uma passada só: não faz sentido vigiar
+    fi
+    [ "$novas" -gt 0 ] && echo "  (${#ALL_PORTA[@]} no ar; vigiando contas novas a cada ${INTERVALO_ALL}s; Ctrl+C encerra)"
+    sleep "$INTERVALO_ALL"
+  done
 }
 
 # --- modo all direto pela linha de comando ---
