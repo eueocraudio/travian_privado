@@ -159,12 +159,13 @@ All game logic lives in a single module, `travian.py` (class `Travian` + a CLI).
 # then delegates to iniciar.sh. Run one terminal per account to go parallel.
 ./interativo.sh              # ask + loop
 ./interativo.sh ciclo        # ask + one pass
-./interativo.sh all          # bring up EVERY account in parallel (one browser/
-                             # port each); also the "(all)" item in the menu. In
-                             # loop mode it stays a supervisor: every ALL_INTERVALO
-                             # s (default 30) it rescans accounts and launches a
-                             # browser for any new (or crashed) account.
-                             # Ctrl+C stops all loops and the browsers it started.
+# Non-interactive: play EVERY account in parallel (one browser/port each). In
+# loop mode it stays a supervisor: every ALL_INTERVALO s (default 30) it rescans
+# accounts and launches a browser for any new (or crashed) account. Ctrl+C stops
+# all loops and the browsers it started.
+./jogar.sh                   # all accounts, loop (supervised)
+./jogar.sh ciclo             # all accounts, one pass each
+./interativo.sh all          # the "(all)" menu item / arg just delegates to jogar.sh
 
 # Direct CLI (assumes the browser server is already up on PORTA=9000):
 python3 travian.py status    # resources/capacity/missions (+ DB snapshot)
